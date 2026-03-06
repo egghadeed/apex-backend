@@ -62,7 +62,7 @@ SCREENSHOTS_DIR  = os.path.join(os.path.expanduser("~"), ".apex_screenshots")
 AUTH_FILE        = os.path.join(os.path.expanduser("~"), ".apex_auth")
 
 # ── Backend URL — change to your deployed URL in production ──────────────────
-BACKEND_URL = os.getenv("APEX_BACKEND_URL", "http://localhost:8000")
+BACKEND_URL = os.getenv("APEX_BACKEND_URL", "https://apex-assistant-api.onrender.com")
 
 # ── Auth state ────────────────────────────────────────────────────────────────
 _access_token:  str = ""
