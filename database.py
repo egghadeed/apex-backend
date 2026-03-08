@@ -15,13 +15,13 @@ def get_db() -> Client:
 
 def get_user_by_email(email: str) -> dict | None:
     db = get_db()
-    res = db.table("users").select("*").eq("email", email).single().execute()
-    return res.data
+    res = db.table("users").select("*").eq("email", email).execute()
+    return res.data[0] if res.data else None
 
 def get_user_by_id(user_id: str) -> dict | None:
     db = get_db()
-    res = db.table("users").select("*").eq("id", user_id).single().execute()
-    return res.data
+    res = db.table("users").select("*").eq("id", user_id).execute()
+    return res.data[0] if res.data else None
 
 def create_user(email: str, hashed_password: str) -> dict:
     db = get_db()
