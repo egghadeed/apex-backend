@@ -84,13 +84,13 @@ def refresh(body: RefreshRequest):
              .select("*, users(*)")
              .eq("token", body.refresh_token)
              .gt("expires_at", now)
-             .single()
              .execute())
 
     if not res.data:
         raise HTTPException(401, "Invalid or expired refresh token")
 
-    user = res.data["users"]
+    token_row = res.data[0]
+    user = token_row["users"]
     if not user.get("active"):
         raise HTTPException(403, "Account is deactivated")
 
