@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import json
 import os
 import resend
 from fastapi import APIRouter, HTTPException, Request, Header
@@ -49,7 +50,7 @@ async def github_webhook(
     if x_github_event != "release":
         return {"status": "ignored"}
 
-    payload = await request.json()
+    payload = json.loads(body)
     if payload.get("action") != "published":
         return {"status": "ignored"}
 
