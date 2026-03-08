@@ -1,21 +1,20 @@
 # apex_backend/auth_utils.py
 from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
-from passlib.context import CryptContext
+import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from config import JWT_SECRET, JWT_ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
 from database import get_user_by_id
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 bearer_scheme = HTTPBearer()
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
 
 def create_access_token(user_id: str, email: str, tier: str) -> str:
@@ -26,12 +25,10 @@ def create_access_token(user_id: str, email: str, tier: str) -> str:
     )
 
 def create_refresh_token(user_id: str) -> str:
-    """Long-lived token — stored in DB and used to issue new access tokens."""
     from config import REFRESH_TOKEN_EXPIRE_DAYS
     import secrets
     token = secrets.token_urlsafe(48)
     expire = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-    # Persist it
     from database import get_db
     db = get_db()
     db.table("refresh_tokens").insert({
@@ -52,8 +49,6 @@ def decode_access_token(token: str) -> dict:
         )
 
 
-# ── FastAPI dependency ────────────────────────────────────────────────────────
-
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
 ) -> dict:
@@ -65,7 +60,6 @@ def get_current_user(
 
 
 def require_active_subscription(user: dict = Depends(get_current_user)) -> dict:
-    """Dependency: user must have an active paid tier or free quota remaining."""
     from config import TIER_LIMITS
     from database import get_usage_this_month
 
