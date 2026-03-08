@@ -98,26 +98,26 @@ async def stripe_webhook(request: Request):
         sub = event["data"]["object"]
         # Find user by stripe customer id
         customer_id = sub["customer"]
-        res = db.table("users").select("id").eq("stripe_customer_id", customer_id).single().execute()
+        res = db.table("users").select("id").eq("stripe_customer_id", customer_id).execute()
         if res.data:
             # Map price back to tier
             price_id = sub["items"]["data"][0]["price"]["id"]
             tier     = PRICE_TO_TIER.get(price_id, "basic")
-            update_user(res.data["id"], {"tier": tier, "active": True})
+            update_user(res.data[0]["id"], {"tier": tier, "active": True})
 
     elif event["type"] in ("customer.subscription.deleted", "customer.subscription.paused"):
         sub         = event["data"]["object"]
         customer_id = sub["customer"]
-        res = db.table("users").select("id").eq("stripe_customer_id", customer_id).single().execute()
+        res = db.table("users").select("id").eq("stripe_customer_id", customer_id).execute()
         if res.data:
-            update_user(res.data["id"], {"tier": "free"})
+            update_user(res.data[0]["id"], {"tier": "free"})
 
     elif event["type"] == "invoice.payment_failed":
         invoice     = event["data"]["object"]
         customer_id = invoice["customer"]
-        res = db.table("users").select("id").eq("stripe_customer_id", customer_id).single().execute()
+        res = db.table("users").select("id").eq("stripe_customer_id", customer_id).execute()
         if res.data:
             # Grace period — don't immediately downgrade, just log
-            print(f"Payment failed for user {res.data['id']}")
+            print(f"Payment failed for user {res.data[0]["id"]}")
 
     return {"received": True}
