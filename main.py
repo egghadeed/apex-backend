@@ -1,10 +1,13 @@
 # apex_backend/main.py
-# FastAPI backend for Apex — handles auth, subscriptions, and Claude proxying
+import sys
+import os
+
+# Ensure project root is on path so routers can import database, config, auth_utils
+sys.path.insert(0, os.path.dirname(__file__))
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-import os
 
 load_dotenv()
 
@@ -12,8 +15,7 @@ from routers import auth, chat, billing, user
 
 app = FastAPI(title="Apex API", version="1.0.0")
 
-# CORS — allow the desktop app and website
-origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+origins = os.getenv("CORS_ORIGINS", "*").split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
