@@ -2154,11 +2154,11 @@ class LoginScreen(tk.Tk):
         self._drag_y = 0
         self.configure(bg=BG_BASE, highlightthickness=1, highlightbackground=CYAN)
         self.title("Apex Assistant")
-        self.geometry("460x380")
+        self.geometry("480x460")
         self.update_idletasks()
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
-        self.geometry(f"460x380+{(sw-460)//2}+{(sh-380)//2}")
+        self.geometry(f"480x460+{(sw-480)//2}+{(sh-460)//2}")
         if sys.platform == "win32":
             self._remove_titlebar_win32()
 
@@ -2261,22 +2261,70 @@ class LoginScreen(tk.Tk):
         self._email.focus_set()
         self.after(3500, lambda: _show_update_dialog_if_pending(self))
 
-    # ── Titlebar strip (Windows) ─────────────────────────────────────────────
+    # ── Titlebar strip + native drag (Windows) ──────────────────────────────
     def _remove_titlebar_win32(self):
         import ctypes
-        GWL_STYLE      = -16
-        WS_CAPTION     = 0x00C00000
-        WS_THICKFRAME  = 0x00040000
-        WS_SYSMENU     = 0x00080000
-        WS_MAXIMIZEBOX = 0x00010000
+        import ctypes.wintypes as wt
+
+        GWL_STYLE        = -16
+        WS_CAPTION       = 0x00C00000
+        WS_THICKFRAME    = 0x00040000
+        WS_SYSMENU       = 0x00080000
+        WS_MAXIMIZEBOX   = 0x00010000
+        SWP_NOMOVE       = 0x0002
+        SWP_NOSIZE       = 0x0001
+        SWP_NOZORDER     = 0x0004
+        SWP_FRAMECHANGED = 0x0020
+
         self.update_idletasks()
         hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
         style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
         style &= ~(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MAXIMIZEBOX)
         ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style)
+        ctypes.windll.user32.SetWindowPos(
+            hwnd, None, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+        )
         self.update_idletasks()
 
-    # ── Drag ────────────────────────────────────────────────────────────────
+        # Native drag via WM_NCHITTEST — same approach as ChatWindow
+        WM_NCHITTEST = 0x0084
+        HTCAPTION    = 2
+        GWLP_WNDPROC = -4
+        TOPBAR_H     = 36
+
+        prototype = ctypes.WINFUNCTYPE(
+            ctypes.c_int64, ctypes.c_int64, ctypes.c_uint,
+            ctypes.c_int64, ctypes.c_int64,
+        )
+        ctypes.windll.user32.GetWindowLongPtrW.restype  = ctypes.c_int64
+        ctypes.windll.user32.GetWindowLongPtrW.argtypes = [ctypes.c_int64, ctypes.c_int]
+        original_proc = ctypes.windll.user32.GetWindowLongPtrW(hwnd, GWLP_WNDPROC)
+
+        cwp = ctypes.windll.user32.CallWindowProcW
+        cwp.restype  = ctypes.c_int64
+        cwp.argtypes = [ctypes.c_int64, ctypes.c_int64, ctypes.c_uint,
+                        ctypes.c_int64, ctypes.c_int64]
+
+        def wnd_proc(h, msg, wparam, lparam):
+            if msg == WM_NCHITTEST:
+                cx = ctypes.c_int16(lparam & 0xFFFF).value
+                cy = ctypes.c_int16((lparam >> 16) & 0xFFFF).value
+                rect = wt.RECT()
+                ctypes.windll.user32.GetWindowRect(h, ctypes.byref(rect))
+                if 0 <= (cy - rect.top) <= TOPBAR_H:
+                    return HTCAPTION
+            return cwp(original_proc, h, msg, wparam, lparam)
+
+        self._wnd_proc_ref = prototype(wnd_proc)
+        ctypes.windll.user32.SetWindowLongPtrW.restype  = ctypes.c_int64
+        ctypes.windll.user32.SetWindowLongPtrW.argtypes = [ctypes.c_int64, ctypes.c_int, ctypes.c_int64]
+        ctypes.windll.user32.SetWindowLongPtrW(
+            hwnd, GWLP_WNDPROC,
+            ctypes.cast(self._wnd_proc_ref, ctypes.c_void_p).value,
+        )
+
+    # ── Drag (fallback for non-Windows) ─────────────────────────────────────
     def _drag_start(self, event):
         self._drag_x = event.x_root - self.winfo_x()
         self._drag_y = event.y_root - self.winfo_y()
