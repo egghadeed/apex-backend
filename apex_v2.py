@@ -63,6 +63,8 @@ AUTH_FILE        = os.path.join(os.path.expanduser("~"), ".apex_auth")
 
 # ── Backend URL — change to your deployed URL in production ──────────────────
 BACKEND_URL   = os.getenv("APEX_BACKEND_URL", "https://apex-assistant-api.onrender.com")
+if not BACKEND_URL.startswith("https://"):
+    raise SystemExit(f"APEX_BACKEND_URL must use https://. Got: {BACKEND_URL}")
 VERSION       = "1.0.0"   # bump this before each release
 DASHBOARD_URL = "https://apex-assistant.vercel.app/dashboard"
 
@@ -75,23 +77,11 @@ def _parse_version(v: str) -> tuple:
     except Exception:
         return (0, 0, 0)
 
-def _show_update_dialog(latest_version: str):
-    import webbrowser
-    from tkinter import messagebox
-    root = tk.Tk()
-    root.withdraw()
-    result = messagebox.askyesno(
-        "Update Available",
-        f"Apex Assistant v{latest_version} is available.\n"
-        f"You have v{VERSION}.\n\n"
-        "Open dashboard to download?",
-    )
-    if result:
-        webbrowser.open(DASHBOARD_URL)
-    root.destroy()
+_pending_update_version: str = ""   # set by background thread; read by main thread
 
 def check_for_updates():
-    """Runs in a background thread on startup. Shows dialog if update available."""
+    """Runs in a background thread on startup. Sets _pending_update_version if newer."""
+    global _pending_update_version
     try:
         req = urllib.request.Request(
             f"{BACKEND_URL}/version",
@@ -101,9 +91,24 @@ def check_for_updates():
             data = json.loads(resp.read().decode())
         latest = data.get("version", "")
         if latest and _parse_version(latest) > _parse_version(VERSION):
-            _show_update_dialog(latest)
+            _pending_update_version = latest
     except Exception:
         pass  # Never crash on update check failure
+
+def _show_update_dialog_if_pending(window: tk.Tk):
+    """Called from main thread via after(). Safe to create messageboxes here."""
+    if _pending_update_version:
+        import webbrowser
+        from tkinter import messagebox
+        result = messagebox.askyesno(
+            "Update Available",
+            f"Apex Assistant v{_pending_update_version} is available.\n"
+            f"You have v{VERSION}.\n\n"
+            "Open dashboard to download?",
+            parent=window,
+        )
+        if result:
+            webbrowser.open(DASHBOARD_URL)
 
 # ── Auth state ────────────────────────────────────────────────────────────────
 _access_token:  str = ""
@@ -120,6 +125,8 @@ def save_auth(access_token: str, refresh_token: str, user: dict):
             json.dump({"access_token": access_token,
                        "refresh_token": refresh_token,
                        "user": user}, f)
+        import stat
+        os.chmod(AUTH_FILE, stat.S_IRUSR | stat.S_IWUSR)  # owner read/write only
     except Exception:
         pass
 
@@ -270,7 +277,9 @@ def save_chat_to_file(messages: list, title: str = None):
     ensure_chat_history_dir()
     if not title:
         title = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    filename = f"{title}.json".replace(":", "-").replace("/", "-")
+    import re
+    safe_title = re.sub(r'[^\w\s\-.]', '_', title)[:80]
+    filename = f"{safe_title}.json"
     filepath = os.path.join(CHAT_HISTORY_DIR, filename)
     try:
         clean_messages = []
@@ -918,6 +927,7 @@ class ChatWindow(tk.Tk):
         self._set_taskbar_title_and_icon()
         self._start_hotkeys()
         self._process_queue()
+        self.after(3500, lambda: _show_update_dialog_if_pending(self))
 
     def _set_taskbar_title_and_icon(self):
         """Set taskbar title and icon. Uses embedded PNG so no external file needed."""
@@ -1819,6 +1829,9 @@ class ChatWindow(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def send_highlighted_text(self, text: str):
+        MAX_CHARS = 8000
+        if len(text) > MAX_CHARS:
+            text = text[:MAX_CHARS] + f"\n\n[truncated — {len(text) - MAX_CHARS} chars omitted]"
         # Store in conversation silently — no bubble, no restore
         self.conversation.append({
             "role": "user",
@@ -1887,8 +1900,14 @@ class ChatWindow(tk.Tk):
                     self.after(0, self._open_mini_chat)
                 elif kind == "error":
                     msg = str(data)
-                    self._add_system_note(f"error: {msg}")
                     self.status_var.set("")
+                    if "Session expired" in msg:
+                        clear_auth()
+                        self.destroy()
+                        login = LoginScreen(on_complete=lambda: ChatWindow().mainloop())
+                        login.mainloop()
+                        return
+                    self._add_system_note(f"error: {msg}")
                     if self._overlay and not self._overlay._dismissed:
                         self._overlay.clear_text()
                         self._overlay.append(f"error: {msg}")
@@ -2112,7 +2131,9 @@ class LoginScreen(tk.Tk):
                                 fg=RED, bg=BG_BASE, wraplength=360, justify=tk.LEFT)
         self._status.pack(anchor=tk.W)
 
+        self._buttons = [login_btn, reg_btn]
         self._email.focus_set()
+        self.after(3500, lambda: _show_update_dialog_if_pending(self))
 
     # ── Titlebar strip (Windows) ─────────────────────────────────────────────
     def _remove_titlebar_win32(self):
@@ -2142,6 +2163,21 @@ class LoginScreen(tk.Tk):
         self._status.configure(text=msg, fg=color)
         self.update()
 
+    def _set_buttons_enabled(self, enabled: bool):
+        state = tk.NORMAL if enabled else tk.DISABLED
+        for w in self._buttons:
+            try:
+                w.configure(state=state)
+            except Exception:
+                pass
+
+    def _handle_http_error(self, e: "urllib.error.HTTPError", fallback: str) -> str:
+        try:
+            body = json.loads(e.read())
+            return body.get("detail", fallback)
+        except Exception:
+            return fallback
+
     def _do_login(self):
         email = self._email.get().strip()
         pw    = self._password.get()
@@ -2149,17 +2185,20 @@ class LoginScreen(tk.Tk):
             self._set_status("Please enter email and password.")
             return
         self._set_status("signing in...", CYAN)
-        try:
-            res = _api_request("POST", "/auth/login",
-                               {"email": email, "password": pw})
-            save_auth(res["access_token"], res["refresh_token"], res["user"])
-            self.destroy()
-            self.on_complete()
-        except urllib.error.HTTPError as e:
-            body = json.loads(e.read())
-            self._set_status(body.get("detail", "Login failed."))
-        except Exception as e:
-            self._set_status(f"Cannot connect to server.\n{e}")
+        self._set_buttons_enabled(False)
+
+        def worker():
+            try:
+                res = _api_request("POST", "/auth/login", {"email": email, "password": pw})
+                self.after(0, lambda: self._on_auth_success(res))
+            except urllib.error.HTTPError as e:
+                msg = self._handle_http_error(e, "Login failed.")
+                self.after(0, lambda m=msg: (self._set_status(m), self._set_buttons_enabled(True)))
+            except Exception as e:
+                msg = f"Cannot connect to server.\n{e}"
+                self.after(0, lambda m=msg: (self._set_status(m), self._set_buttons_enabled(True)))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _do_register(self):
         email = self._email.get().strip()
@@ -2171,17 +2210,25 @@ class LoginScreen(tk.Tk):
             self._set_status("Password must be at least 8 characters.")
             return
         self._set_status("creating account...", CYAN)
-        try:
-            res = _api_request("POST", "/auth/register",
-                               {"email": email, "password": pw})
-            save_auth(res["access_token"], res["refresh_token"], res["user"])
-            self.destroy()
-            self.on_complete()
-        except urllib.error.HTTPError as e:
-            body = json.loads(e.read())
-            self._set_status(body.get("detail", "Registration failed."))
-        except Exception as e:
-            self._set_status(f"Cannot connect to server.\n{e}")
+        self._set_buttons_enabled(False)
+
+        def worker():
+            try:
+                res = _api_request("POST", "/auth/register", {"email": email, "password": pw})
+                self.after(0, lambda: self._on_auth_success(res))
+            except urllib.error.HTTPError as e:
+                msg = self._handle_http_error(e, "Registration failed.")
+                self.after(0, lambda m=msg: (self._set_status(m), self._set_buttons_enabled(True)))
+            except Exception as e:
+                msg = f"Cannot connect to server.\n{e}"
+                self.after(0, lambda m=msg: (self._set_status(m), self._set_buttons_enabled(True)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_auth_success(self, res: dict):
+        save_auth(res["access_token"], res["refresh_token"], res["user"])
+        self.destroy()
+        self.on_complete()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
