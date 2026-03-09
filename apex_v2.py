@@ -433,7 +433,7 @@ class FloatingOverlay(tk.Toplevel):
         self.configure(bg=BG_BASE)
 
         sw = self.winfo_screenwidth()
-        self.geometry(f"400x52+{sw - 420}+20")
+        self.geometry(f"520x60+{sw - 540}+20")
 
         # Cyan top border line
         tk.Frame(self, bg=CYAN, height=1).pack(fill=tk.X)
@@ -559,13 +559,13 @@ class FloatingOverlay(tk.Toplevel):
         except Exception:
             cur_x = sw - 420
             cur_y = 20
-        cpl   = 52
+        cpl   = 68   # chars per line at width 520
         lines = sum(max(1, (len(ln) // cpl) + 1) for ln in content.split('\n'))
         lines = max(lines, content.count('\n') + 1)
-        txt_h = min(max(lines, 1), 14)
+        txt_h = min(max(lines, 1), 24)
         self._text.configure(height=txt_h)
-        total_h = min(txt_h * 18 + 56, sh // 2)
-        self.geometry(f"400x{total_h}+{cur_x}+{cur_y}")
+        total_h = min(txt_h * 18 + 60, int(sh * 0.65))
+        self.geometry(f"520x{total_h}+{cur_x}+{cur_y}")
 
     # ── Timer tick ────────────────────────────────────────────────────────────
 
@@ -2182,9 +2182,12 @@ class LoginScreen(tk.Tk):
         close_btn.bind("<Enter>",    lambda e: close_btn.configure(fg=RED))
         close_btn.bind("<Leave>",    lambda e: close_btn.configure(fg=TEXT_MUTED))
 
-        for w in (top, dot, title_lbl):
-            w.bind("<ButtonPress-1>",  self._drag_start)
-            w.bind("<B1-Motion>",      self._drag_motion)
+        # On Windows the WM_NCHITTEST hook handles drag natively — no Python bindings needed.
+        # On other platforms fall back to Python-based drag.
+        if sys.platform != "win32":
+            for w in (top, dot, title_lbl):
+                w.bind("<ButtonPress-1>",  self._drag_start)
+                w.bind("<B1-Motion>",      self._drag_motion)
 
         tk.Frame(self, bg=BORDER, height=1).pack(fill=tk.X)
 
