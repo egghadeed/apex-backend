@@ -65,7 +65,7 @@ AUTH_FILE        = os.path.join(os.path.expanduser("~"), ".apex_auth")
 BACKEND_URL   = os.getenv("APEX_BACKEND_URL", "https://apex-assistant-api.onrender.com")
 if not BACKEND_URL.startswith("https://"):
     raise SystemExit(f"APEX_BACKEND_URL must use https://. Got: {BACKEND_URL}")
-VERSION       = "1.0.0"   # bump this before each release
+VERSION       = "1.1"   # bump this before each release
 DASHBOARD_URL = "https://apex-assistant.vercel.app/dashboard"
 
 # ── Update check ──────────────────────────────────────────────────────────────
