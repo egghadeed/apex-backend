@@ -15,6 +15,7 @@ SUPABASE_URL         = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY", "")
 
 STRIPE_SECRET_KEY      = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET  = os.getenv("STRIPE_WEBHOOK_SECRET", "")
@@ -35,10 +36,36 @@ TIER_LIMITS = {
     "power": -1,
 }
 
-# Claude model per tier
-TIER_MODELS = {
-    "free":  "claude-haiku-4-5-20251001",
-    "basic": "claude-haiku-4-5-20251001",
-    "pro":   "claude-sonnet-4-20250514",
-    "power": "claude-opus-4-20250514",
+# Vision support per model
+VISION_CAPABLE = {
+    "gpt-4o-mini":               True,
+    "gpt-4o":                    True,
+    "gpt-4-turbo":               True,
+    "o1-mini":                   False,
+    "o1":                        True,
+    "o3-mini":                   False,
+    "claude-haiku-4-5-20251001": True,
+    "claude-sonnet-4-20250514":  True,
+    "claude-opus-4-20250514":    True,
 }
+
+# Default model per tier
+TIER_DEFAULT_MODEL = {
+    "free":  "gpt-4o-mini",
+    "basic": "gpt-4o",
+    "pro":   "gpt-4o",
+    "power": "gpt-4-turbo",
+}
+
+# Models each tier can choose from (free/basic fixed; pro/power selectable)
+TIER_SELECTABLE_MODELS = {
+    "free":  ["gpt-4o-mini"],
+    "basic": ["gpt-4o"],
+    "pro":   ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "o1-mini",
+              "claude-haiku-4-5-20251001"],
+    "power": ["gpt-4o", "gpt-4-turbo", "o1", "o3-mini",
+              "claude-sonnet-4-20250514", "claude-opus-4-20250514"],
+}
+
+# Legacy alias used by existing code
+TIER_MODELS = TIER_DEFAULT_MODEL

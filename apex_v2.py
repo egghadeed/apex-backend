@@ -110,10 +110,35 @@ def _show_update_dialog_if_pending(window: tk.Tk):
         if result:
             webbrowser.open(DASHBOARD_URL)
 
+# ── Model metadata (mirrors backend config) ───────────────────────────────────
+MODEL_DISPLAY = {
+    "gpt-4o-mini":               "GPT-4o mini",
+    "gpt-4o":                    "GPT-4o",
+    "gpt-4-turbo":               "GPT-4 Turbo",
+    "o1-mini":                   "o1 mini",
+    "o1":                        "o1",
+    "o3-mini":                   "o3 mini",
+    "claude-haiku-4-5-20251001": "Claude Haiku",
+    "claude-sonnet-4-20250514":  "Claude Sonnet",
+    "claude-opus-4-20250514":    "Claude Opus",
+}
+VISION_CAPABLE_CLIENT = {
+    "gpt-4o-mini":               True,
+    "gpt-4o":                    True,
+    "gpt-4-turbo":               True,
+    "o1-mini":                   False,
+    "o1":                        True,
+    "o3-mini":                   False,
+    "claude-haiku-4-5-20251001": True,
+    "claude-sonnet-4-20250514":  True,
+    "claude-opus-4-20250514":    True,
+}
+
 # ── Auth state ────────────────────────────────────────────────────────────────
 _access_token:  str = ""
 _refresh_token: str = ""
 _user_info:     dict = {}
+_preferred_model: str = ""   # empty = use tier default
 
 def save_auth(access_token: str, refresh_token: str, user: dict):
     global _access_token, _refresh_token, _user_info
@@ -124,7 +149,8 @@ def save_auth(access_token: str, refresh_token: str, user: dict):
         with open(AUTH_FILE, "w") as f:
             json.dump({"access_token": access_token,
                        "refresh_token": refresh_token,
-                       "user": user}, f)
+                       "user": user,
+                       "preferred_model": _preferred_model}, f)
         import stat
         os.chmod(AUTH_FILE, stat.S_IRUSR | stat.S_IWUSR)  # owner read/write only
     except Exception:
@@ -132,14 +158,15 @@ def save_auth(access_token: str, refresh_token: str, user: dict):
 
 def load_auth() -> bool:
     """Load saved tokens. Returns True if tokens exist (not validated yet)."""
-    global _access_token, _refresh_token, _user_info
+    global _access_token, _refresh_token, _user_info, _preferred_model
     try:
         if os.path.exists(AUTH_FILE):
             with open(AUTH_FILE) as f:
                 data = json.load(f)
-            _access_token  = data.get("access_token", "")
-            _refresh_token = data.get("refresh_token", "")
-            _user_info     = data.get("user", {})
+            _access_token    = data.get("access_token", "")
+            _refresh_token   = data.get("refresh_token", "")
+            _user_info       = data.get("user", {})
+            _preferred_model = data.get("preferred_model", "")
             return bool(_access_token and _refresh_token)
     except Exception:
         pass
@@ -330,8 +357,11 @@ def ask_claude(messages: list, on_chunk=None) -> str:
     """Stream chat via Apex backend. Handles token refresh automatically."""
     global _access_token
 
-    url  = f"{BACKEND_URL}/chat/stream"
-    body = json.dumps({"messages": messages}).encode()
+    url      = f"{BACKEND_URL}/chat/stream"
+    payload  = {"messages": messages}
+    if _preferred_model:
+        payload["model"] = _preferred_model
+    body = json.dumps(payload).encode()
 
     def do_request(token: str) -> urllib.request.Request:
         req = urllib.request.Request(url, data=body, method="POST")
@@ -922,12 +952,28 @@ class ChatWindow(tk.Tk):
         self._pages: dict = {}
         self._sidebar_buttons: dict = {}
         self._ss_empty = None
+        self._ss_hotkey_label = None   # updated when model changes
 
         self._build_ui()
         self._set_taskbar_title_and_icon()
         self._start_hotkeys()
         self._process_queue()
         self.after(3500, lambda: _show_update_dialog_if_pending(self))
+        threading.Thread(target=self._fetch_profile, daemon=True).start()
+
+    def _fetch_profile(self):
+        """Background thread: fetch full profile and update _user_info with available_models."""
+        global _user_info
+        try:
+            profile = _api_request("GET", "/user/profile", token=_access_token)
+            _user_info.update({
+                "tier":             profile.get("tier", _user_info.get("tier", "free")),
+                "model":            profile.get("model", ""),
+                "available_models": profile.get("available_models", []),
+            })
+            save_auth(_access_token, _refresh_token, _user_info)
+        except Exception:
+            pass
 
     def _set_taskbar_title_and_icon(self):
         """Set taskbar title and icon. Uses embedded PNG so no external file needed."""
@@ -1586,6 +1632,65 @@ class ChatWindow(tk.Tk):
         so_btn.bind("<Leave>",    lambda e: (so_btn.configure(bg=BG_BASE, fg=TEXT_SECONDARY),
                                              so_outer.configure(bg=BORDER)))
 
+        # MODEL section
+        tk.Frame(body, bg=BORDER, height=1).pack(fill=tk.X, pady=(0, 0))
+        section_label("MODEL")
+
+        available = _user_info.get("available_models", [])
+        tier_name = _user_info.get("tier", "free")
+
+        if len(available) <= 1:
+            # Free / basic — fixed model, just show it
+            fixed_id   = available[0]["id"] if available else "gpt-4o-mini"
+            fixed_name = MODEL_DISPLAY.get(fixed_id, fixed_id)
+            tk.Label(body, text=fixed_name,
+                     font=(FONT_MONO, 9), fg=CYAN, bg=BG_BASE).pack(anchor=tk.W, pady=(0, 4))
+            tk.Label(body,
+                     text="upgrade to pro or power to choose your model",
+                     font=(FONT_MONO, 7), fg=TEXT_MUTED, bg=BG_BASE).pack(anchor=tk.W, pady=(0, 12))
+        else:
+            # Pro / power — selectable dropdown
+            model_ids   = [m["id"]   for m in available]
+            model_names = [MODEL_DISPLAY.get(m["id"], m["id"]) +
+                           ("  ·  no vision" if not m["vision"] else "")
+                           for m in available]
+
+            current = _preferred_model if _preferred_model in model_ids else model_ids[0]
+            sel_var = tk.StringVar(value=MODEL_DISPLAY.get(current, current))
+
+            menu_frame = tk.Frame(body, bg=BG_SURFACE2,
+                                  highlightthickness=1, highlightbackground=BORDER)
+            menu_frame.pack(fill=tk.X, pady=(0, 6))
+
+            opt = tk.OptionMenu(menu_frame, sel_var, *model_names)
+            opt.configure(bg=BG_SURFACE2, fg=TEXT_PRIMARY, font=(FONT_MONO, 9),
+                          activebackground=CYAN_DIM, activeforeground=TEXT_PRIMARY,
+                          highlightthickness=0, relief=tk.FLAT, bd=0,
+                          indicatoron=True)
+            opt["menu"].configure(bg=BG_SURFACE2, fg=TEXT_PRIMARY,
+                                  font=(FONT_MONO, 9), activebackground=CYAN_DIM)
+            opt.pack(fill=tk.X, padx=2, pady=2)
+
+            model_status = tk.Label(body, text="", font=(FONT_MONO, 7),
+                                    fg=CYAN, bg=BG_BASE)
+            model_status.pack(anchor=tk.W, pady=(0, 12))
+
+            def on_model_change(*_):
+                global _preferred_model
+                chosen_name = sel_var.get().split("  ·")[0].strip()
+                chosen_id   = next(
+                    (mid for mid, mname in zip(model_ids, model_names)
+                     if mname.split("  ·")[0].strip() == chosen_name),
+                    model_ids[0]
+                )
+                _preferred_model = chosen_id
+                save_auth(_access_token, _refresh_token, _user_info)
+                model_status.configure(text=f"model set to {chosen_name.lower()}", fg=CYAN)
+                self.after(2000, lambda: model_status.configure(text=""))
+                self._update_ss_hotkey_color()
+
+            sel_var.trace_add("write", on_model_change)
+
         # SCREENSHOTS section
         tk.Frame(body, bg=BORDER, height=1).pack(fill=tk.X, pady=(0, 0))
         section_label("SCREENSHOTS")
@@ -1622,15 +1727,26 @@ class ChatWindow(tk.Tk):
             lambda e: (del_btn.configure(bg=BG_BASE, fg=RED),
                        del_outer.configure(bg=RED)))
 
+    def _update_ss_hotkey_color(self):
+        """Dim the screenshot shortcut label if current model has no vision."""
+        if not self._ss_hotkey_label:
+            return
+        model  = _preferred_model or _user_info.get("model", "")
+        vision = VISION_CAPABLE_CLIENT.get(model, True)
+        self._ss_hotkey_label.configure(
+            fg=RED if not vision else TEXT_PRIMARY,
+        )
+
     def _build_about_page(self, container):
         body = tk.Frame(container, bg=BG_BASE, padx=28, pady=24)
         body.pack(fill=tk.BOTH, expand=True)
 
         # Big wordmark
+        model_name = MODEL_DISPLAY.get(_preferred_model or _user_info.get("model", ""), "AI")
         tk.Label(body, text="APEX",
                  font=(FONT_MONO, 28, "bold"),
                  fg=TEXT_PRIMARY, bg=BG_BASE).pack(anchor=tk.W)
-        tk.Label(body, text="v1.0.0 — powered by claude",
+        tk.Label(body, text=f"v{VERSION} — {model_name.lower()}",
                  font=(FONT_MONO, 8),
                  fg=TEXT_MUTED, bg=BG_BASE).pack(anchor=tk.W, pady=(0, 20))
 
@@ -1645,22 +1761,32 @@ class ChatWindow(tk.Tk):
                  font=(FONT_MONO, 7, "bold"),
                  fg=TEXT_MUTED, bg=BG_BASE).pack(anchor=tk.W, pady=(0, 10))
 
+        active_model = _preferred_model or _user_info.get("model", "")
+        vision_ok    = VISION_CAPABLE_CLIENT.get(active_model, True)
+
         for keys, desc in [
             ("Ctrl+Shift+S", "capture screenshot and ask"),
             ("Ctrl+Shift+H", "send highlighted text"),
             ("Ctrl+Shift+A", "open quick ask"),
             ("Ctrl+Shift+Q", "quit"),
         ]:
-            row = tk.Frame(body, bg=BG_BASE)
+            is_ss = keys == "Ctrl+Shift+S"
+            row   = tk.Frame(body, bg=BG_BASE)
             row.pack(fill=tk.X, pady=3)
-            chip = tk.Frame(row, bg=BG_SURFACE2, padx=8, pady=3)
+            chip_bg   = BG_SURFACE2 if (vision_ok or not is_ss) else "#2a1010"
+            chip_fg   = TEXT_PRIMARY if (vision_ok or not is_ss) else RED
+            chip      = tk.Frame(row, bg=chip_bg, padx=8, pady=3)
             chip.pack(side=tk.LEFT)
-            tk.Label(chip, text=keys,
+            lbl = tk.Label(chip, text=keys, font=(FONT_MONO, 8),
+                           fg=chip_fg, bg=chip_bg)
+            lbl.pack()
+            if is_ss:
+                self._ss_hotkey_label = lbl
+            suffix = "  (no vision — model can't see screenshots)" if is_ss and not vision_ok else ""
+            tk.Label(row, text=desc + suffix,
                      font=(FONT_MONO, 8),
-                     fg=TEXT_PRIMARY, bg=BG_SURFACE2).pack()
-            tk.Label(row, text=desc,
-                     font=(FONT_MONO, 8),
-                     fg=TEXT_SECONDARY, bg=BG_BASE).pack(side=tk.LEFT, padx=12)
+                     fg=RED if (is_ss and not vision_ok) else TEXT_SECONDARY,
+                     bg=BG_BASE).pack(side=tk.LEFT, padx=12)
 
     # ── Scroll helpers ────────────────────────────────────────────────────────
 

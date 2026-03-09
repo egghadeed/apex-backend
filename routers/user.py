@@ -3,20 +3,26 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from auth_utils import get_current_user
 from database import update_user, get_usage_this_month, get_db
-from config import TIER_LIMITS, TIER_MODELS
+from config import TIER_LIMITS, TIER_DEFAULT_MODEL, TIER_SELECTABLE_MODELS, VISION_CAPABLE
 
 router = APIRouter()
 
 
 @router.get("/profile")
 def profile(user: dict = Depends(get_current_user)):
+    tier  = user.get("tier", "free")
     used  = get_usage_this_month(user["id"])
-    limit = TIER_LIMITS.get(user["tier"], 50)
+    limit = TIER_LIMITS.get(tier, 50)
+    selectable = TIER_SELECTABLE_MODELS.get(tier, [TIER_DEFAULT_MODEL.get(tier)])
     return {
-        "id":           user["id"],
-        "email":        user["email"],
-        "tier":         user["tier"],
-        "model":        TIER_MODELS.get(user["tier"]),
+        "id":    user["id"],
+        "email": user["email"],
+        "tier":  tier,
+        "model": TIER_DEFAULT_MODEL.get(tier),
+        "available_models": [
+            {"id": m, "vision": VISION_CAPABLE.get(m, True)}
+            for m in selectable
+        ],
         "usage": {
             "used":      used,
             "limit":     limit,
