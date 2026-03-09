@@ -62,7 +62,7 @@ SCREENSHOTS_DIR  = os.path.join(os.path.expanduser("~"), ".apex_screenshots")
 AUTH_FILE        = os.path.join(os.path.expanduser("~"), ".apex_auth")
 
 # ── Backend URL — change to your deployed URL in production ──────────────────
-BACKEND_URL   = os.getenv("APEX_BACKEND_URL", "http://localhost:8000")
+BACKEND_URL   = os.getenv("APEX_BACKEND_URL", "https://apex-assistant-api.onrender.com")
 VERSION       = "1.0.0"   # bump this before each release
 DASHBOARD_URL = "https://apex-assistant.vercel.app/dashboard"
 
@@ -2007,13 +2007,15 @@ class LoginScreen(tk.Tk):
         self.on_complete  = on_complete
         self._drag_x = 0
         self._drag_y = 0
-        self.overrideredirect(True)
         self.configure(bg=BG_BASE, highlightthickness=1, highlightbackground=CYAN)
+        self.title("Apex Assistant")
         self.geometry("460x380")
         self.update_idletasks()
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
         self.geometry(f"460x380+{(sw-460)//2}+{(sh-380)//2}")
+        if sys.platform == "win32":
+            self._remove_titlebar_win32()
 
         # ── Topbar ──────────────────────────────────────────────────────────
         top = tk.Frame(self, bg=BG_SIDEBAR, height=36)
@@ -2111,6 +2113,21 @@ class LoginScreen(tk.Tk):
         self._status.pack(anchor=tk.W)
 
         self._email.focus_set()
+
+    # ── Titlebar strip (Windows) ─────────────────────────────────────────────
+    def _remove_titlebar_win32(self):
+        import ctypes
+        GWL_STYLE      = -16
+        WS_CAPTION     = 0x00C00000
+        WS_THICKFRAME  = 0x00040000
+        WS_SYSMENU     = 0x00080000
+        WS_MAXIMIZEBOX = 0x00010000
+        self.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+        style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
+        style &= ~(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MAXIMIZEBOX)
+        ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style)
+        self.update_idletasks()
 
     # ── Drag ────────────────────────────────────────────────────────────────
     def _drag_start(self, event):
