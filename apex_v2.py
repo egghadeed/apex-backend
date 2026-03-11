@@ -414,19 +414,36 @@ def _record_wav(seconds: float = 5.0, samplerate: int = 16000) -> bytes:
 
 def _transcribe_wav(wav_bytes: bytes) -> str:
     """POST wav bytes to backend /chat/transcribe, return transcribed text."""
+    global _access_token
     boundary = "ApexAudioBoundary42"
     body = (
         f"--{boundary}\r\n"
         f'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
         f"Content-Type: audio/wav\r\n\r\n"
     ).encode() + wav_bytes + f"\r\n--{boundary}--\r\n".encode()
-    req = urllib.request.Request(
-        f"{BACKEND_URL}/chat/transcribe", data=body, method="POST"
-    )
-    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
-    req.add_header("Authorization", f"Bearer {_access_token}")
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read()).get("text", "")
+
+    def _build_req(token: str) -> urllib.request.Request:
+        r = urllib.request.Request(
+            f"{BACKEND_URL}/chat/transcribe", data=body, method="POST"
+        )
+        r.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+        r.add_header("Authorization", f"Bearer {token}")
+        return r
+
+    tried_refresh = False
+    while True:
+        req = _build_req(_access_token)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read()).get("text", "")
+        except urllib.error.HTTPError as e:
+            if e.code == 401 and not tried_refresh:
+                tried_refresh = True
+                if refresh_access_token():
+                    continue  # retry with new token
+                else:
+                    raise RuntimeError("Session expired — please log in again")
+            raise
 
 
 class _Cancelled(Exception):
@@ -1076,6 +1093,8 @@ class ChatWindow(tk.Tk):
         self._images = []
         self._is_generating = False
         self._cancel_event  = threading.Event()
+        self._mic_btn = None
+        self._recording = False
 
         self._screenshots: list = []
         self._active_page: str = ""
@@ -2564,6 +2583,8 @@ class ChatWindow(tk.Tk):
         listener.start()
 
     def _trigger_voice(self):
+        if self._mic_btn is None:
+            return
         try:
             import sounddevice  # noqa — check available
         except ImportError:
