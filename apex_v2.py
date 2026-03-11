@@ -1421,7 +1421,8 @@ class ChatWindow(tk.Tk):
         self._search_visible = not self._search_visible
         if self._search_visible:
             # Pack search bar right after the header separator
-            children = list(self._search_frame.master.winfo_children())
+            children = [w for w in self._search_frame.master.winfo_children()
+                        if w is not self._search_frame]
             # Find the separator (height=1 frame) and insert after it
             sep_idx = next(
                 (i for i, w in enumerate(children)
@@ -1441,27 +1442,28 @@ class ChatWindow(tk.Tk):
         if not query:
             self._search_status.configure(text="")
             return
-        matches = [
-            i for i, m in enumerate(self.conversation)
-            if query in (
-                m["content"] if isinstance(m["content"], str)
-                else " ".join(p.get("text", "") for p in m["content"]
-                              if isinstance(p, dict) and p.get("type") == "text")
-            ).lower()
-        ]
+        children = [w for w in self._msg_frame.winfo_children()
+                    if isinstance(w, MessageBubble)]
+        match_widgets = []
+        for bubble in children:
+            # Extract text from the bubble's Text widget
+            try:
+                text = bubble._text.get("1.0", tk.END).lower()
+            except Exception:
+                text = ""
+            if query in text:
+                match_widgets.append(bubble)
+        n = len(match_widgets)
         self._search_status.configure(
-            text=f"{len(matches)} match{'es' if len(matches) != 1 else ''}"
+            text=f"{n} match{'es' if n != 1 else ''}"
         )
-        if matches:
-            children = [w for w in self._msg_frame.winfo_children()
-                        if isinstance(w, MessageBubble)]
-            if matches[0] < len(children):
-                target = children[matches[0]]
-                self._canvas.update_idletasks()
-                frame_h = self._msg_frame.winfo_height()
-                target_y = target.winfo_y()
-                if frame_h > 0:
-                    self._canvas.yview_moveto(target_y / frame_h)
+        if match_widgets:
+            target = match_widgets[0]
+            self._canvas.update_idletasks()
+            frame_h = self._msg_frame.winfo_height()
+            target_y = target.winfo_y()
+            if frame_h > 0:
+                self._canvas.yview_moveto(target_y / frame_h)
 
     def _clear_search(self):
         self._search_visible = False
