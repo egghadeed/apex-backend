@@ -1015,19 +1015,27 @@ class MessageBubble(tk.Frame):
             cursor="arrow",
         )
         self._text.pack(fill=tk.X)
+        self._text.bind("<Configure>", self._fit_height)
+
+    def _fit_height(self, _=None):
+        self._text.update_idletasks()
+        n = self._text.count("1.0", tk.END, "displaylines")
+        h = max(n[0] if n else 1, 1)
+        if int(self._text.cget("height")) != h:
+            self._text.configure(height=h)
 
     def append(self, text: str, tag="body"):
         self._text.configure(state=tk.NORMAL)
         self._text.insert(tk.END, text)
-        lines = int(self._text.index(tk.END).split(".")[0])
-        self._text.configure(height=max(lines, 1), state=tk.DISABLED)
+        self._fit_height()
+        self._text.configure(state=tk.DISABLED)
 
     def set_image(self, photo):
         self._text.configure(state=tk.NORMAL)
         self._text.image_create(tk.END, image=photo)
         self._text.insert(tk.END, "\n")
-        lines = int(self._text.index(tk.END).split(".")[0]) + 6
-        self._text.configure(height=max(lines, 8), state=tk.DISABLED)
+        self._fit_height()
+        self._text.configure(state=tk.DISABLED)
 
 
 class ChatSession:
