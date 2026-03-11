@@ -563,7 +563,7 @@ class FloatingOverlay(tk.Toplevel):
         self.configure(bg=BG_BASE)
 
         sw = self.winfo_screenwidth()
-        self.geometry(f"620x120+{sw - 640}+20")
+        self.geometry(f"520x180+{sw - 540}+20")
 
         # Cyan top border line
         tk.Frame(self, bg=CYAN, height=1).pack(fill=tk.X)
@@ -733,13 +733,13 @@ class FloatingOverlay(tk.Toplevel):
         except Exception:
             cur_x = sw - 420
             cur_y = 20
-        cpl   = 82   # chars per line at width 620
+        cpl   = 68   # chars per line at width 520
         lines = sum(max(1, (len(ln) // cpl) + 1) for ln in content.split('\n'))
         lines = max(lines, content.count('\n') + 1)
         txt_h = min(max(lines, 1), 24)
         self._text.configure(height=txt_h)
         total_h = min(txt_h * 18 + 60, int(sh * 0.65))
-        self.geometry(f"620x{total_h}+{cur_x}+{cur_y}")
+        self.geometry(f"520x{total_h}+{cur_x}+{cur_y}")
 
     # ── Timer tick ────────────────────────────────────────────────────────────
 
