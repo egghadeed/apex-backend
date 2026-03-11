@@ -995,6 +995,14 @@ class ChatWindow(tk.Tk):
         self._process_queue()
         self.after(3500, lambda: _show_update_dialog_if_pending(self))
         threading.Thread(target=self._fetch_profile, daemon=True).start()
+        threading.Thread(target=self._warmup, daemon=True).start()
+
+    def _warmup(self):
+        """Send a silent throwaway message on startup to wake the backend/model."""
+        try:
+            ask_claude([{"role": "user", "content": "hi"}])
+        except Exception:
+            pass
 
     def _fetch_profile(self):
         """Background thread: fetch full profile and update _user_info with available_models."""
