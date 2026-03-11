@@ -393,6 +393,42 @@ def pil_to_b64(img: Image.Image) -> str:
     img.save(buf, format="PNG")
     return base64.standard_b64encode(buf.getvalue()).decode()
 
+
+def _record_wav(seconds: float = 5.0, samplerate: int = 16000) -> bytes:
+    """Record from mic and return raw WAV bytes."""
+    import sounddevice as sd
+    import numpy as np
+    import wave
+    import io
+    frames = sd.rec(int(seconds * samplerate), samplerate=samplerate,
+                    channels=1, dtype="int16")
+    sd.wait()
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(samplerate)
+        wf.writeframes(frames.tobytes())
+    return buf.getvalue()
+
+
+def _transcribe_wav(wav_bytes: bytes) -> str:
+    """POST wav bytes to backend /chat/transcribe, return transcribed text."""
+    boundary = "ApexAudioBoundary42"
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
+        f"Content-Type: audio/wav\r\n\r\n"
+    ).encode() + wav_bytes + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        f"{BACKEND_URL}/chat/transcribe", data=body, method="POST"
+    )
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    req.add_header("Authorization", f"Bearer {_access_token}")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read()).get("text", "")
+
+
 class _Cancelled(Exception):
     """Raised inside on_chunk to abort an in-progress stream."""
     pass
@@ -1687,6 +1723,18 @@ class ChatWindow(tk.Tk):
         self._send_btn.bind("<Enter>", lambda e: self._send_btn.configure(fg=CYAN_HOVER))
         self._send_btn.bind("<Leave>", lambda e: self._send_btn.configure(fg=CYAN))
 
+        tk.Frame(input_frame, bg=BORDER, width=1).pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._mic_btn = tk.Label(
+            input_frame, text="🎤", font=(FONT_MONO, 11),
+            fg=TEXT_MUTED, bg=BG_SURFACE2, cursor="hand2", padx=6,
+        )
+        self._mic_btn.pack(side=tk.RIGHT, fill=tk.Y)
+        self._mic_btn.bind("<Button-1>", lambda e: self._trigger_voice())
+        self._mic_btn.bind("<Enter>", lambda e: self._mic_btn.configure(fg=CYAN))
+        self._mic_btn.bind("<Leave>", lambda e: self._mic_btn.configure(fg=TEXT_MUTED))
+        self._recording = False
+
         btn_row = tk.Frame(bottom, bg=BG_SIDEBAR)
         btn_row.pack(fill=tk.X, pady=(6, 0))
 
@@ -2516,7 +2564,45 @@ class ChatWindow(tk.Tk):
         listener.start()
 
     def _trigger_voice(self):
-        pass  # implemented in Task 5
+        try:
+            import sounddevice  # noqa — check available
+        except ImportError:
+            self._add_system_note("voice input requires: pip install sounddevice numpy")
+            return
+        if self._is_generating:
+            return
+        if getattr(self, "_recording", False):
+            return
+
+        self._recording = True
+        self._mic_btn.configure(fg="#ff4d4d")
+        self.status_var.set("recording 5s...")
+
+        def worker():
+            try:
+                wav = _record_wav(seconds=5)
+                self.after(0, lambda: self.status_var.set("transcribing..."))
+                text = _transcribe_wav(wav)
+
+                def fill_input():
+                    self.status_var.set("")
+                    self._recording = False
+                    self._mic_btn.configure(fg=TEXT_MUTED)
+                    if text:
+                        self.input_box.delete("1.0", tk.END)
+                        self.input_box.insert("1.0", text)
+                        self.input_box.focus_set()
+
+                self.after(0, fill_input)
+            except Exception as ex:
+                def show_err():
+                    self.status_var.set("")
+                    self._recording = False
+                    self._mic_btn.configure(fg=TEXT_MUTED)
+                    self._add_system_note(f"voice error: {ex}")
+                self.after(0, show_err)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _trigger_screenshot(self):
         if self._overlay and not self._overlay._dismissed:
