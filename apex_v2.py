@@ -1621,9 +1621,22 @@ class ChatWindow(tk.Tk):
             except Exception:
                 pass
         new_idx = min(idx, len(self._sessions) - 1)
-        # Force _switch_session to rebuild by setting _active_session to a sentinel
-        self._active_session = -1
-        self._switch_session(new_idx)
+        self._active_session = new_idx
+        # Rebuild message area for the now-active session directly,
+        # avoiding _switch_session which would early-return (idx == _active_session)
+        # and previously used self._sessions[-1] via the -1 sentinel, corrupting scroll.
+        for w in self._msg_frame.winfo_children():
+            w.destroy()
+        self._current_bubble = None
+        self._empty_label = None
+        if not self.conversation:
+            self._empty_label = tk.Label(self._msg_frame, text="", bg=BG_BASE)
+            self._empty_label.pack(expand=True, pady=4)
+        else:
+            self._display_loaded_chat()
+        pos = getattr(self._sessions[new_idx], "_scroll_pos", 1.0)
+        self.after(50, lambda: self._canvas.yview_moveto(pos))
+        self._refresh_tab_bar()
 
     def _toggle_search(self):
         self._search_visible = not self._search_visible
