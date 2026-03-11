@@ -563,7 +563,7 @@ class FloatingOverlay(tk.Toplevel):
         self.configure(bg=BG_BASE)
 
         sw = self.winfo_screenwidth()
-        self.geometry(f"520x180+{sw - 540}+20")
+        self.geometry(f"480x180+{sw - 540}+20")
 
         # Cyan top border line
         tk.Frame(self, bg=CYAN, height=1).pack(fill=tk.X)
@@ -2177,7 +2177,7 @@ class ChatWindow(tk.Tk):
         section_label("MODEL")
 
         tier_name = _user_info.get("tier", "free")
-        available = _user_info.get("available_models") or [
+        available = [
             {"id": m, "vision": v}
             for m, v in TIER_MODELS_CLIENT.get(tier_name, TIER_MODELS_CLIENT["free"])
         ]
