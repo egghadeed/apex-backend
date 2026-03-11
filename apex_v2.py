@@ -1546,8 +1546,8 @@ class ChatWindow(tk.Tk):
             is_active = (i == self._active_session)
             btn_bg = CYAN_DIM if is_active else BG_SIDEBAR
 
-            btn_f = tk.Frame(self._tab_bar, bg=btn_bg, padx=10, pady=0)
-            btn_f.pack(side=tk.LEFT, fill=tk.Y)
+            btn_f = tk.Frame(self._tab_bar, bg=btn_bg)
+            btn_f.pack(side=tk.LEFT, fill=tk.Y, padx=(10, 0))
 
             if is_active:
                 tk.Frame(btn_f, bg=CYAN, height=2).pack(fill=tk.X)
