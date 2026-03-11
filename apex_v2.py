@@ -974,6 +974,45 @@ class PromptDialog(tk.Toplevel):
         self._on_submit(self._img, prompt)
 
 
+# ── LaTeX math rendering ──────────────────────────────────────────────────────
+
+def _render_math_image(expr: str, display: bool, bg: str) -> "ImageTk.PhotoImage | None":
+    """Render a LaTeX math expression to a PhotoImage using matplotlib mathtext."""
+    try:
+        import io
+        import matplotlib
+        matplotlib.use("Agg")
+        from matplotlib.figure import Figure
+        from PIL import Image, ImageTk as _ITk
+
+        latex = f"$\\displaystyle {expr}$" if display else f"${expr}$"
+
+        fig = Figure(dpi=110)
+        fig.patch.set_facecolor(bg)
+        ax = fig.add_subplot(111)
+        ax.set_axis_off()
+        ax.patch.set_facecolor(bg)
+
+        t = ax.text(0, 0.5, latex, fontsize=9.5, color=TEXT_PRIMARY,
+                    va="center", ha="left", transform=ax.transAxes)
+
+        fig.canvas.draw()
+        bb = t.get_window_extent(renderer=fig.canvas.get_renderer())
+        w = max(bb.width  / fig.dpi + 0.15, 0.3)
+        h = max(bb.height / fig.dpi + 0.10, 0.2)
+        fig.set_size_inches(w, h)
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=110, bbox_inches="tight",
+                    pad_inches=0.04, facecolor=bg, edgecolor="none")
+        buf.seek(0)
+        fig.clf()
+
+        return _ITk.PhotoImage(Image.open(buf).convert("RGBA"))
+    except Exception:
+        return None
+
+
 # ── Message Bubble — terminal log strip ───────────────────────────────────────
 
 class MessageBubble(tk.Frame):
@@ -1016,6 +1055,8 @@ class MessageBubble(tk.Frame):
         )
         self._text.pack(fill=tk.X)
         self._text.bind("<Configure>", self._fit_height)
+        self._bg = bg
+        self._math_images: list = []  # keep PhotoImage refs alive
 
     def _fit_height(self, _=None):
         self._text.update_idletasks()
@@ -1036,6 +1077,46 @@ class MessageBubble(tk.Frame):
         self._text.insert(tk.END, "\n")
         self._fit_height()
         self._text.configure(state=tk.DISABLED)
+
+    def render_math(self):
+        """Replace $...$ and $$...$$ spans with rendered math images."""
+        import re
+        content = self._text.get("1.0", tk.END)
+
+        # Match $$...$$ (display) first, then $...$ (inline)
+        pattern = re.compile(r'\$\$([\s\S]+?)\$\$|\$([^\$\n]+?)\$')
+        segments = []
+        last = 0
+        for m in pattern.finditer(content):
+            if m.start() > last:
+                segments.append(("text", content[last:m.start()]))
+            if m.group(1) is not None:
+                segments.append(("display", m.group(1).strip()))
+            else:
+                segments.append(("inline", m.group(2).strip()))
+            last = m.end()
+        if last < len(content):
+            segments.append(("text", content[last:]))
+
+        if not any(k in ("display", "inline") for k, _ in segments):
+            return  # no math found
+
+        self._text.configure(state=tk.NORMAL)
+        self._text.delete("1.0", tk.END)
+        for kind, val in segments:
+            if kind == "text":
+                self._text.insert(tk.END, val)
+            else:
+                img = _render_math_image(val, display=(kind == "display"), bg=self._bg)
+                if img:
+                    self._math_images.append(img)
+                    self._text.image_create(tk.END, image=img)
+                    if kind == "display":
+                        self._text.insert(tk.END, "\n")
+                else:
+                    self._text.insert(tk.END, f"${'$' if kind=='display' else ''}{val}${'$' if kind=='display' else ''}")
+        self._text.configure(state=tk.DISABLED)
+        self._fit_height()
 
 
 class ChatSession:
@@ -2589,6 +2670,9 @@ class ChatWindow(tk.Tk):
                         self._overlay.clear_text()
                 elif kind == "done":
                     self.status_var.set("")
+                    if self._current_bubble:
+                        self._current_bubble.render_math()
+                        self._scroll_bottom()
                     self._current_bubble = None
                     self._set_generating(False)
                 elif kind == "overlay_chunk":
