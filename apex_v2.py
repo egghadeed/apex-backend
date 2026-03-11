@@ -2107,8 +2107,7 @@ class ChatWindow(tk.Tk):
         dur_var  = tk.IntVar(value=dur_secs)
 
         dur_val_lbl = tk.Label(dur_row, text=f"{dur_secs}s",
-                                font=(FONT_MONO, 9), fg=CYAN, bg=BG_BASE, width=5)
-        dur_val_lbl.pack(side=tk.RIGHT)
+                                font=(FONT_MONO, 9), fg=CYAN, bg=BG_BASE)
 
         def on_dur_change(val):
             global _overlay_duration_ms
@@ -2126,6 +2125,7 @@ class ChatWindow(tk.Tk):
             showvalue=False, length=200,
         )
         dur_slider.pack(side=tk.LEFT)
+        dur_val_lbl.pack(side=tk.LEFT, padx=(6, 0))
 
         tk.Label(body, text="click overlay to pin it and pause the timer",
                  font=(FONT_MONO, 7), fg=TEXT_MUTED, bg=BG_BASE).pack(anchor=tk.W, pady=(4, 0))
