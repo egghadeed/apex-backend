@@ -3,7 +3,9 @@
 
 import anthropic
 import json
-from fastapi import APIRouter, Depends, HTTPException
+import tempfile
+import os
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Any, Optional
@@ -50,14 +52,14 @@ def _is_openai(model: str) -> bool:
     return model.startswith("gpt-") or model.startswith("o1") or model.startswith("o3")
 
 
-def _convert_messages_for_openai(messages: list[dict], model: str) -> list[dict]:
+def _convert_messages_for_openai(messages: list[dict], model: str, system: str = None) -> list[dict]:
     """Convert Anthropic-style message format to OpenAI format."""
     vision = VISION_CAPABLE.get(model, True)
     converted = []
 
     # o1/o3: inject system as first user message
     if model in O1_MODELS:
-        converted.append({"role": "user", "content": f"[System]: {SYSTEM_PROMPT}"})
+        converted.append({"role": "user", "content": f"[System]: {system or SYSTEM_PROMPT}"})
 
     for msg in messages:
         role = msg["role"]
@@ -96,7 +98,7 @@ def _stream_openai(model: str, messages: list[dict], system: str = None):
     from openai import OpenAI
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    oai_messages = _convert_messages_for_openai(messages, model)
+    oai_messages = _convert_messages_for_openai(messages, model, system=system)
 
     kwargs: dict = {
         "model":    model,
@@ -206,3 +208,27 @@ def get_usage(user: dict = Depends(require_active_subscription)):
         "unlimited": limit == -1,
         "tier":      user["tier"],
     }
+
+
+@router.post("/transcribe")
+async def transcribe_audio(
+    file: UploadFile = File(...),
+    user: dict = Depends(require_active_subscription),
+):
+    from openai import OpenAI
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    audio_bytes = await file.read()
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        f.write(audio_bytes)
+        tmp_path = f.name
+    try:
+        with open(tmp_path, "rb") as f:
+            result = client.audio.transcriptions.create(model="whisper-1", file=f)
+        return {"text": result.text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
