@@ -652,12 +652,17 @@ class FloatingOverlay(tk.Toplevel):
     # ── Drag to move ──────────────────────────────────────────────────────────
 
     def _drag_start(self, event):
-        self._drag_x  = event.x_root - self.winfo_x()
-        self._drag_y  = event.y_root - self.winfo_y()
+        self._drag_x   = event.x_root - self.winfo_x()
+        self._drag_y   = event.y_root - self.winfo_y()
+        self._press_x  = event.x_root
+        self._press_y  = event.y_root
         self._dragging = False
 
     def _drag_motion(self, event):
-        self._dragging = True
+        dx = abs(event.x_root - getattr(self, "_press_x", event.x_root))
+        dy = abs(event.y_root - getattr(self, "_press_y", event.y_root))
+        if dx > 5 or dy > 5:
+            self._dragging = True
         x = event.x_root - self._drag_x
         y = event.y_root - self._drag_y
         # Keep within screen bounds
