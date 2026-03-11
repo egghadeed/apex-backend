@@ -45,6 +45,7 @@ try:
     import matplotlib as _mpl
     _mpl.use("Agg")
     from matplotlib.figure import Figure as _MplFigure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg as _FigureCanvasAgg
     _MATPLOTLIB_OK = True
 except Exception:
     _MATPLOTLIB_OK = False
@@ -160,6 +161,18 @@ def _show_update_dialog_if_pending(window: tk.Tk):
             webbrowser.open(DASHBOARD_URL)
 
 # ── Model metadata (mirrors backend config) ───────────────────────────────────
+# Fallback model lists per tier — used when available_models isn't populated yet
+TIER_MODELS_CLIENT = {
+    "free":  [("gpt-4o-mini", True)],
+    "basic": [("gpt-4o-mini", True), ("gpt-4o", True)],
+    "pro":   [("gpt-4o-mini", True), ("gpt-4o", True), ("gpt-4-turbo", True),
+              ("o1-mini", False), ("claude-haiku-4-5-20251001", True)],
+    "power": [("gpt-4o-mini", True), ("gpt-4o", True), ("gpt-4-turbo", True),
+              ("o1-mini", False), ("claude-haiku-4-5-20251001", True),
+              ("o1", True), ("o3-mini", False),
+              ("claude-sonnet-4-20250514", True), ("claude-opus-4-20250514", True)],
+}
+
 MODEL_DISPLAY = {
     "gpt-4o-mini":               "GPT-4o mini",
     "gpt-4o":                    "GPT-4o",
@@ -549,7 +562,7 @@ class FloatingOverlay(tk.Toplevel):
         self.configure(bg=BG_BASE)
 
         sw = self.winfo_screenwidth()
-        self.geometry(f"520x60+{sw - 540}+20")
+        self.geometry(f"620x80+{sw - 640}+20")
 
         # Cyan top border line
         tk.Frame(self, bg=CYAN, height=1).pack(fill=tk.X)
@@ -673,13 +686,13 @@ class FloatingOverlay(tk.Toplevel):
         except Exception:
             cur_x = sw - 420
             cur_y = 20
-        cpl   = 68   # chars per line at width 520
+        cpl   = 82   # chars per line at width 620
         lines = sum(max(1, (len(ln) // cpl) + 1) for ln in content.split('\n'))
         lines = max(lines, content.count('\n') + 1)
         txt_h = min(max(lines, 1), 24)
         self._text.configure(height=txt_h)
         total_h = min(txt_h * 18 + 60, int(sh * 0.65))
-        self.geometry(f"520x{total_h}+{cur_x}+{cur_y}")
+        self.geometry(f"620x{total_h}+{cur_x}+{cur_y}")
 
     # ── Timer tick ────────────────────────────────────────────────────────────
 
@@ -993,6 +1006,7 @@ def _render_math_image(expr: str, display: bool, bg: str) -> "ImageTk.PhotoImage
         latex = f"$\\displaystyle {expr}$" if display else f"${expr}$"
 
         fig = _MplFigure(dpi=110)
+        _FigureCanvasAgg(fig)   # attach Agg canvas so fig.canvas.draw() works
         fig.patch.set_facecolor(bg)
         ax = fig.add_subplot(111)
         ax.set_axis_off()
@@ -2115,8 +2129,11 @@ class ChatWindow(tk.Tk):
         tk.Frame(body, bg=BORDER, height=1).pack(fill=tk.X, pady=(0, 0))
         section_label("MODEL")
 
-        available = _user_info.get("available_models", [])
         tier_name = _user_info.get("tier", "free")
+        available = _user_info.get("available_models") or [
+            {"id": m, "vision": v}
+            for m, v in TIER_MODELS_CLIENT.get(tier_name, TIER_MODELS_CLIENT["free"])
+        ]
 
         if len(available) <= 1:
             # Free / basic — fixed model, just show it
