@@ -555,6 +555,7 @@ class FloatingOverlay(tk.Toplevel):
         self._drag_x     = 0
         self._drag_y     = 0
         self._on_followup = on_followup
+        self._math_images: list = []
 
         self.overrideredirect(True)
         self.attributes("-topmost", True)
@@ -562,7 +563,7 @@ class FloatingOverlay(tk.Toplevel):
         self.configure(bg=BG_BASE)
 
         sw = self.winfo_screenwidth()
-        self.geometry(f"620x80+{sw - 640}+20")
+        self.geometry(f"620x120+{sw - 640}+20")
 
         # Cyan top border line
         tk.Frame(self, bg=CYAN, height=1).pack(fill=tk.X)
@@ -674,6 +675,52 @@ class FloatingOverlay(tk.Toplevel):
         self._text.configure(state=tk.NORMAL)
         self._text.delete("1.0", tk.END)
         self._text.configure(state=tk.DISABLED)
+
+    def render_math(self):
+        """Render LaTeX math spans as images (same logic as MessageBubble)."""
+        if self._dismissed or not _MATPLOTLIB_OK:
+            return
+        import re
+        content = self._text.get("1.0", tk.END)
+        pattern = re.compile(
+            r'\$\$([\s\S]+?)\$\$'
+            r'|\\\[([\s\S]+?)\\\]'
+            r'|\$([^\$\n]+?)\$'
+            r'|\\\(([^\n]+?)\\\)'
+        )
+        segments, last = [], 0
+        for m in pattern.finditer(content):
+            if m.start() > last:
+                segments.append(("text", content[last:m.start()]))
+            if m.group(1) is not None:
+                segments.append(("display", m.group(1).strip()))
+            elif m.group(2) is not None:
+                segments.append(("display", m.group(2).strip()))
+            elif m.group(3) is not None:
+                segments.append(("inline", m.group(3).strip()))
+            else:
+                segments.append(("inline", m.group(4).strip()))
+            last = m.end()
+        if last < len(content):
+            segments.append(("text", content[last:]))
+        if not any(k in ("display", "inline") for k, _ in segments):
+            return
+        self._text.configure(state=tk.NORMAL)
+        self._text.delete("1.0", tk.END)
+        for kind, val in segments:
+            if kind == "text":
+                self._text.insert(tk.END, val)
+            else:
+                img = _render_math_image(val, display=(kind == "display"), bg=BG_BASE)
+                if img:
+                    self._math_images.append(img)
+                    self._text.image_create(tk.END, image=img)
+                    if kind == "display":
+                        self._text.insert(tk.END, "\n")
+                else:
+                    self._text.insert(tk.END, val)
+        self._text.configure(state=tk.DISABLED)
+        self._resize()
 
     def _resize(self):
         content = self._text.get("1.0", tk.END)
@@ -2135,7 +2182,7 @@ class ChatWindow(tk.Tk):
             for m, v in TIER_MODELS_CLIENT.get(tier_name, TIER_MODELS_CLIENT["free"])
         ]
 
-        if len(available) <= 1:
+        if tier_name not in ("pro", "power"):
             # Free / basic — fixed model, just show it
             fixed_id   = available[0]["id"] if available else "gpt-4o-mini"
             fixed_name = MODEL_DISPLAY.get(fixed_id, fixed_id)
@@ -2720,7 +2767,8 @@ class ChatWindow(tk.Tk):
                     if self._overlay and not self._overlay._dismissed:
                         self._overlay.append(data)
                 elif kind == "overlay_done":
-                    pass  # overlay auto-dismisses via timer
+                    if self._overlay and not self._overlay._dismissed:
+                        self._overlay.render_math()
                 elif kind == "overlay_error":
                     if self._overlay and not self._overlay._dismissed:
                         self._overlay.clear_text()
