@@ -40,6 +40,15 @@ from pynput import keyboard
 from PIL import Image, ImageTk
 import mss
 
+# matplotlib — optional, used for LaTeX math rendering
+try:
+    import matplotlib as _mpl
+    _mpl.use("Agg")
+    from matplotlib.figure import Figure as _MplFigure
+    _MATPLOTLIB_OK = True
+except Exception:
+    _MATPLOTLIB_OK = False
+
 # ── Config ────────────────────────────────────────────────────────────────────
 SYSTEM = (
     "You are Apex, a helpful desktop AI assistant. "
@@ -978,16 +987,12 @@ class PromptDialog(tk.Toplevel):
 
 def _render_math_image(expr: str, display: bool, bg: str) -> "ImageTk.PhotoImage | None":
     """Render a LaTeX math expression to a PhotoImage using matplotlib mathtext."""
+    if not _MATPLOTLIB_OK:
+        return None
     try:
-        import io
-        import matplotlib
-        matplotlib.use("Agg")
-        from matplotlib.figure import Figure
-        from PIL import Image, ImageTk as _ITk
-
         latex = f"$\\displaystyle {expr}$" if display else f"${expr}$"
 
-        fig = Figure(dpi=110)
+        fig = _MplFigure(dpi=110)
         fig.patch.set_facecolor(bg)
         ax = fig.add_subplot(111)
         ax.set_axis_off()
@@ -1008,7 +1013,7 @@ def _render_math_image(expr: str, display: bool, bg: str) -> "ImageTk.PhotoImage
         buf.seek(0)
         fig.clf()
 
-        return _ITk.PhotoImage(Image.open(buf).convert("RGBA"))
+        return ImageTk.PhotoImage(Image.open(buf).convert("RGBA"))
     except Exception:
         return None
 
