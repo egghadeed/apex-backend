@@ -545,6 +545,11 @@ class FloatingOverlay(tk.Toplevel):
         # Cyan top border line
         tk.Frame(self, bg=CYAN, height=1).pack(fill=tk.X)
 
+        # Progress bar strip — shrinks as countdown ticks
+        self._prog_canvas = tk.Canvas(self, bg=BG_BASE, height=2, highlightthickness=0)
+        self._prog_canvas.pack(fill=tk.X)
+        self._prog_rect = self._prog_canvas.create_rectangle(0, 0, 10000, 2, fill=CYAN, outline="")
+
         self._body = tk.Frame(self, bg=BG_BASE)
         self._body.pack(fill=tk.BOTH, expand=True)
 
@@ -559,12 +564,6 @@ class FloatingOverlay(tk.Toplevel):
 
         tk.Label(topbar, text="APEX", font=(FONT_MONO, 8, "bold"),
                  fg=CYAN, bg=BG_BASE).pack(side=tk.LEFT)
-
-        # Timer label — hidden while pinned
-        self._timer_lbl = tk.Label(topbar, text=f"[{_overlay_duration_ms // 1000}s]",
-                                   font=(FONT_MONO, 7),
-                                   fg=TEXT_MUTED, bg=BG_BASE)
-        self._timer_lbl.pack(side=tk.LEFT, padx=8)
 
         close = tk.Label(topbar, text="×", font=(FONT_MONO, 10),
                          fg=TEXT_MUTED, bg=BG_BASE, cursor="hand2")
@@ -596,7 +595,7 @@ class FloatingOverlay(tk.Toplevel):
 
         # Click anywhere on overlay (except × button) to toggle pin
         drag_targets = [self, self._body, topbar, dot_c, txt_frame, self._text,
-                        self._timer_lbl, self._pin_lbl]
+                        self._prog_canvas, self._pin_lbl]
         for w in drag_targets:
             w.bind("<Button-1>",        self._on_click,      add="+")
             w.bind("<ButtonPress-1>",   self._drag_start,    add="+")
@@ -643,7 +642,6 @@ class FloatingOverlay(tk.Toplevel):
             return
         self._pinned = not self._pinned
         if self._pinned:
-            self._timer_lbl.configure(text="")
             self._pin_lbl.configure(text="[pinned]")
             self.attributes("-alpha", 1.0)
         else:
@@ -711,10 +709,11 @@ class FloatingOverlay(tk.Toplevel):
         if self._dismissed: return
         if not self._pinned:
             self._remaining -= 250
-            secs = max(0, self._remaining // 1000)
-            self._timer_lbl.configure(text=f"[{secs}s]")
             if self._remaining <= 0:
                 self._dismiss(); return
+            pct = max(0.0, self._remaining / _overlay_duration_ms)
+            w = self._prog_canvas.winfo_width() or 520
+            self._prog_canvas.coords(self._prog_rect, 0, 0, int(w * pct), 2)
         self.after(250, self._tick)
 
     def _submit_followup(self):
@@ -1385,7 +1384,7 @@ class ChatWindow(tk.Tk):
         icon_lbl = tk.Label(btn_area, text=icon,
                             font=(FONT_MONO, 15),
                             fg=TEXT_MUTED, bg=BG_SIDEBAR,
-                            cursor="hand2")
+                            cursor="hand2", width=2, anchor="center")
         icon_lbl.pack(expand=True)
 
         widgets = (row, btn_area, icon_lbl)
@@ -1485,9 +1484,9 @@ class ChatWindow(tk.Tk):
         self._search_entry = tk.Entry(
             search_input_frame, textvariable=self._search_var,
             bg=BG_SURFACE2, fg=TEXT_PRIMARY, font=(FONT_MONO, 9),
-            relief=tk.FLAT, insertbackground=CYAN, padx=8, pady=5,
+            relief=tk.FLAT, insertbackground=CYAN,
         )
-        self._search_entry.pack(fill=tk.X)
+        self._search_entry.pack(fill=tk.X, padx=8, pady=5)
         self._search_entry.bind("<Return>",    lambda e: self._do_search())
         self._search_entry.bind("<Escape>",    lambda e: self._clear_search())
         self._search_entry.bind("<KeyRelease>", lambda e: self._do_search())
@@ -1966,10 +1965,20 @@ class ChatWindow(tk.Tk):
 
         body = tk.Frame(canvas, bg=BG_BASE, padx=28, pady=20)
         canvas.create_window((0, 0), window=body, anchor="nw")
-        body.bind("<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<MouseWheel>",
-            lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+
+        def _on_mousewheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+
+        def _bind_scroll(w):
+            w.bind("<MouseWheel>", _on_mousewheel)
+            for child in w.winfo_children():
+                _bind_scroll(child)
+
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        body.bind("<Configure>", lambda e: (
+            canvas.configure(scrollregion=canvas.bbox("all")),
+            _bind_scroll(body),
+        ))
 
         tk.Label(body, text="SETTINGS",
                  font=(FONT_MONO, 10, "bold"),
@@ -2310,6 +2319,7 @@ class ChatWindow(tk.Tk):
             ("Ctrl+Shift+S", "capture screenshot and ask"),
             ("Ctrl+Shift+H", "send highlighted text"),
             ("Ctrl+Shift+A", "open quick ask"),
+            ("Ctrl+Shift+V", "voice input"),
             ("Ctrl+Shift+Q", "quit"),
         ]:
             is_ss = keys == "Ctrl+Shift+S"
@@ -2355,6 +2365,7 @@ class ChatWindow(tk.Tk):
 
     def _scroll_bottom(self):
         self._canvas.update_idletasks()
+        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
         self._canvas.yview_moveto(1.0)
 
     # ── Message helpers ───────────────────────────────────────────────────────
