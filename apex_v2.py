@@ -616,15 +616,20 @@ class FloatingOverlay(tk.Toplevel):
         )
         self._text.pack(fill=tk.BOTH, expand=True)
 
-        # Click anywhere on overlay (except × button) to toggle pin
-        drag_targets = [self, self._body, topbar, dot_c, txt_frame, self._text,
-                        self._prog_canvas, self._pin_lbl]
-        for w in drag_targets:
-            w.bind("<ButtonPress-1>",   self._drag_start,    add="+")
-            w.bind("<B1-Motion>",       self._drag_motion,   add="+")
-            w.bind("<ButtonRelease-1>", self._on_click,      add="+")
+        # Bind drag/pin events to every widget in the overlay tree
+        self._bind_overlay_events(self)
 
         self._tick()
+
+    # ── Event binding ─────────────────────────────────────────────────────────
+
+    def _bind_overlay_events(self, widget):
+        """Recursively bind drag/click events to every widget in the overlay."""
+        widget.bind("<ButtonPress-1>",   self._drag_start, add="+")
+        widget.bind("<B1-Motion>",       self._drag_motion, add="+")
+        widget.bind("<ButtonRelease-1>", self._on_click,   add="+")
+        for child in widget.winfo_children():
+            self._bind_overlay_events(child)
 
     # ── Pin / unpin on click ──────────────────────────────────────────────────
 
