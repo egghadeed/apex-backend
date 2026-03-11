@@ -563,7 +563,7 @@ class FloatingOverlay(tk.Toplevel):
         self.configure(bg=BG_BASE)
 
         sw = self.winfo_screenwidth()
-        self.geometry(f"480x180+{sw - 540}+20")
+        self.geometry(f"520x300+{sw - 560}+20")
 
         # Cyan top border line
         tk.Frame(self, bg=CYAN, height=1).pack(fill=tk.X)
@@ -738,7 +738,7 @@ class FloatingOverlay(tk.Toplevel):
         lines = max(lines, content.count('\n') + 1)
         txt_h = min(max(lines, 1), 24)
         self._text.configure(height=txt_h)
-        total_h = min(txt_h * 18 + 60, int(sh * 0.65))
+        total_h = min(max(txt_h * 18 + 80, 260), int(sh * 0.65))
         self.geometry(f"520x{total_h}+{cur_x}+{cur_y}")
 
     # ── Timer tick ────────────────────────────────────────────────────────────
