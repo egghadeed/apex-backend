@@ -65,6 +65,13 @@ SETTINGS_FILE    = os.path.join(os.path.expanduser("~"), ".apex_settings")
 # ── User-configurable settings ────────────────────────────────────────────────
 _overlay_duration_ms: int = 8000   # popup auto-close duration (ms)
 _custom_system_prompt: str = ""  # empty = use backend default
+_hotkeys: dict = {
+    "screenshot": "s",
+    "highlight":  "h",
+    "chat":       "a",
+    "quit":       "q",
+    "voice":      "v",   # for Task 5
+}
 
 def load_settings():
     global _overlay_duration_ms, _custom_system_prompt
@@ -75,6 +82,10 @@ def load_settings():
             _overlay_duration_ms = max(3000, min(60000,
                 int(data.get("overlay_duration_ms", 8000))))
             _custom_system_prompt = str(data.get("custom_system_prompt", ""))
+            loaded_hk = data.get("hotkeys", {})
+            for k in _hotkeys:
+                if k in loaded_hk and len(str(loaded_hk[k])) == 1:
+                    _hotkeys[k] = str(loaded_hk[k]).lower()
     except Exception:
         pass
 
@@ -82,7 +93,8 @@ def save_settings():
     try:
         with open(SETTINGS_FILE, "w") as f:
             json.dump({"overlay_duration_ms": _overlay_duration_ms,
-                       "custom_system_prompt": _custom_system_prompt}, f)
+                       "custom_system_prompt": _custom_system_prompt,
+                       "hotkeys": _hotkeys}, f)
     except Exception:
         pass
 
@@ -1848,6 +1860,57 @@ class ChatWindow(tk.Tk):
         sp_save.pack(anchor=tk.W, pady=(4, 0))
         sp_save.bind("<Button-1>", save_sp)
 
+        tk.Frame(body, bg=BORDER, height=1).pack(fill=tk.X, pady=(12, 0))
+        section_label("HOTKEYS")
+        tk.Label(body, text="all hotkeys use Ctrl+Shift+<key>",
+                 font=(FONT_MONO, 7), fg=TEXT_MUTED, bg=BG_BASE).pack(anchor=tk.W, pady=(0, 8))
+
+        hk_entries = {}
+        hk_status  = tk.Label(body, text="", font=(FONT_MONO, 7), fg=CYAN, bg=BG_BASE)
+
+        for action, label_text in [
+            ("screenshot", "Screenshot"),
+            ("highlight",  "Highlight"),
+            ("chat",       "Quick Ask"),
+            ("quit",       "Quit"),
+            ("voice",      "Voice Input"),
+        ]:
+            row = tk.Frame(body, bg=BG_BASE)
+            row.pack(fill=tk.X, pady=2)
+            tk.Label(row, text=f"Ctrl+Shift+", font=(FONT_MONO, 8),
+                     fg=TEXT_MUTED, bg=BG_BASE, width=14, anchor=tk.W).pack(side=tk.LEFT)
+            entry_frame = tk.Frame(row, bg=BG_SURFACE2, highlightthickness=1,
+                                   highlightbackground=BORDER)
+            entry_frame.pack(side=tk.LEFT)
+            ent = tk.Entry(entry_frame, width=3, bg=BG_SURFACE2, fg=CYAN,
+                           font=(FONT_MONO, 10), relief=tk.FLAT,
+                           insertbackground=CYAN, justify=tk.CENTER)
+            ent.insert(0, _hotkeys.get(action, ""))
+            ent.pack(padx=6, pady=3)
+            hk_entries[action] = ent
+            tk.Label(row, text=label_text, font=(FONT_MONO, 8),
+                     fg=TEXT_SECONDARY, bg=BG_BASE, padx=8).pack(side=tk.LEFT)
+
+        hk_status.pack(anchor=tk.W, pady=(4, 0))
+
+        def save_hotkeys(_=None):
+            global _hotkeys
+            used = set()
+            for action, ent in hk_entries.items():
+                val = ent.get().strip()[:1].lower()
+                if val and val not in used:
+                    _hotkeys[action] = val
+                    used.add(val)
+            save_settings()
+            hk_status.configure(text="saved — restart hotkey listener to apply")
+            body.after(2500, lambda: hk_status.configure(text=""))
+
+        hk_save = tk.Label(body, text="  save hotkeys  ",
+                           font=(FONT_MONO, 8), fg=BG_BASE, bg=CYAN,
+                           cursor="hand2", padx=8, pady=4)
+        hk_save.pack(anchor=tk.W, pady=(4, 0))
+        hk_save.bind("<Button-1>", save_hotkeys)
+
     def _update_ss_hotkey_color(self):
         """Dim the screenshot shortcut label if current model has no vision."""
         if not self._ss_hotkey_label:
@@ -2231,10 +2294,6 @@ class ChatWindow(tk.Tk):
 
     def _start_hotkeys(self):
         current_keys = set()
-        SCREENSHOT_CHARS = {'\x13', 's', 'S'}
-        HIGHLIGHT_CHARS  = {'\x08', 'h', 'H'}
-        CHAT_CHARS       = {'\x01', 'a', 'A'}
-        QUIT_CHARS       = {'\x11', 'q', 'Q'}
 
         def normalize(k):
             if k == keyboard.Key.ctrl_r:  return keyboard.Key.ctrl_l
@@ -2249,21 +2308,31 @@ class ChatWindow(tk.Tk):
         def is_ctrl_shift(keys):
             return keyboard.Key.ctrl_l in keys and keyboard.Key.shift in keys
 
+        def matches(char, action):
+            k = _hotkeys.get(action, "")
+            if not char or not k: return False
+            return char.lower() == k.lower() or (
+                ord(char) < 32 and chr(ord(char) + 64).lower() == k.lower()
+            )
+
         def on_press(key):
             current_keys.add(normalize(key))
             char = get_char(key)
             if is_ctrl_shift(current_keys):
-                if char in SCREENSHOT_CHARS:
+                if matches(char, "screenshot"):
                     current_keys.clear()
                     self.after(0, self._trigger_screenshot)
-                elif char in HIGHLIGHT_CHARS:
+                elif matches(char, "highlight"):
                     current_keys.clear()
                     self.after(0, self._trigger_highlight)
-                elif char in CHAT_CHARS:
+                elif matches(char, "chat"):
                     current_keys.clear()
                     self.after(0, self._open_mini_chat)
-                elif char in QUIT_CHARS:
+                elif matches(char, "quit"):
                     self.after(0, self.destroy)
+                elif matches(char, "voice"):
+                    current_keys.clear()
+                    self.after(0, self._trigger_voice)
 
         def on_release(key):
             current_keys.discard(normalize(key))
@@ -2271,6 +2340,9 @@ class ChatWindow(tk.Tk):
         listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         listener.daemon = True
         listener.start()
+
+    def _trigger_voice(self):
+        pass  # implemented in Task 5
 
     def _trigger_screenshot(self):
         if self._overlay and not self._overlay._dismissed:
