@@ -60,6 +60,28 @@ msg_queue: queue.Queue = queue.Queue()
 CHAT_HISTORY_DIR = os.path.join(os.path.expanduser("~"), ".apex_chats")
 SCREENSHOTS_DIR  = os.path.join(os.path.expanduser("~"), ".apex_screenshots")
 AUTH_FILE        = os.path.join(os.path.expanduser("~"), ".apex_auth")
+SETTINGS_FILE    = os.path.join(os.path.expanduser("~"), ".apex_settings")
+
+# ── User-configurable settings ────────────────────────────────────────────────
+_overlay_duration_ms: int = 8000   # popup auto-close duration (ms)
+
+def load_settings():
+    global _overlay_duration_ms
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE) as f:
+                data = json.load(f)
+            _overlay_duration_ms = max(3000, min(60000,
+                int(data.get("overlay_duration_ms", 8000))))
+    except Exception:
+        pass
+
+def save_settings():
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump({"overlay_duration_ms": _overlay_duration_ms}, f)
+    except Exception:
+        pass
 
 # ── Backend URL — change to your deployed URL in production ──────────────────
 BACKEND_URL   = os.getenv("APEX_BACKEND_URL", "https://apex-assistant-api.onrender.com")
@@ -353,7 +375,13 @@ def pil_to_b64(img: Image.Image) -> str:
     img.save(buf, format="PNG")
     return base64.standard_b64encode(buf.getvalue()).decode()
 
-def ask_claude(messages: list, on_chunk=None) -> str:
+class _Cancelled(Exception):
+    """Raised inside on_chunk to abort an in-progress stream."""
+    pass
+
+
+def ask_claude(messages: list, on_chunk=None,
+               cancel_event: threading.Event = None) -> str:
     """Stream chat via Apex backend. Handles token refresh automatically."""
     global _access_token
 
@@ -378,7 +406,9 @@ def ask_claude(messages: list, on_chunk=None) -> str:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 buffer = ""
                 while True:
-                    chunk = resp.read(64)
+                    if cancel_event and cancel_event.is_set():
+                        raise _Cancelled()
+                    chunk = resp.read(1024)
                     if not chunk:
                         break
                     buffer += chunk.decode("utf-8", errors="replace")
@@ -401,6 +431,9 @@ def ask_claude(messages: list, on_chunk=None) -> str:
                             raise RuntimeError(event.get("message", "Unknown error"))
             return full
 
+        except _Cancelled:
+            raise  # propagate cancellation up to the worker thread
+
         except urllib.error.HTTPError as e:
             if e.code == 401 and not tried_refresh:
                 tried_refresh = True
@@ -417,13 +450,13 @@ def ask_claude(messages: list, on_chunk=None) -> str:
 # ── Floating Overlay — HUD tooltip style ──────────────────────────────────────
 
 class FloatingOverlay(tk.Toplevel):
-    AUTO_CLOSE_MS = 8000
+    AUTO_CLOSE_MS = 8000  # fallback default
 
     def __init__(self, master):
         super().__init__(master)
         self._dismissed  = False
         self._pinned     = False   # click to pin — pauses timer, hides countdown
-        self._remaining  = self.AUTO_CLOSE_MS
+        self._remaining  = _overlay_duration_ms
         self._drag_x     = 0
         self._drag_y     = 0
 
@@ -454,7 +487,7 @@ class FloatingOverlay(tk.Toplevel):
                  fg=CYAN, bg=BG_BASE).pack(side=tk.LEFT)
 
         # Timer label — hidden while pinned
-        self._timer_lbl = tk.Label(topbar, text="[8s]",
+        self._timer_lbl = tk.Label(topbar, text=f"[{_overlay_duration_ms // 1000}s]",
                                    font=(FONT_MONO, 7),
                                    fg=TEXT_MUTED, bg=BG_BASE)
         self._timer_lbl.pack(side=tk.LEFT, padx=8)
@@ -946,6 +979,8 @@ class ChatWindow(tk.Tk):
         self._overlay: FloatingOverlay | None = None
         self._current_bubble: MessageBubble | None = None
         self._images = []
+        self._is_generating = False
+        self._cancel_event  = threading.Event()
 
         self._screenshots: list = []
         self._active_page: str = ""
@@ -1727,6 +1762,43 @@ class ChatWindow(tk.Tk):
             lambda e: (del_btn.configure(bg=BG_BASE, fg=RED),
                        del_outer.configure(bg=RED)))
 
+        # POPUP section
+        tk.Frame(body, bg=BORDER, height=1).pack(fill=tk.X, pady=(12, 0))
+        section_label("POPUP")
+
+        tk.Label(body, text="answer popup duration",
+                 font=(FONT_MONO, 8), fg=TEXT_SECONDARY, bg=BG_BASE).pack(anchor=tk.W)
+
+        dur_row = tk.Frame(body, bg=BG_BASE)
+        dur_row.pack(fill=tk.X, pady=(6, 0))
+
+        dur_secs = _overlay_duration_ms // 1000
+        dur_var  = tk.IntVar(value=dur_secs)
+
+        dur_val_lbl = tk.Label(dur_row, text=f"{dur_secs}s",
+                                font=(FONT_MONO, 9), fg=CYAN, bg=BG_BASE, width=5)
+        dur_val_lbl.pack(side=tk.RIGHT)
+
+        def on_dur_change(val):
+            global _overlay_duration_ms
+            secs = int(float(val))
+            _overlay_duration_ms = secs * 1000
+            dur_val_lbl.configure(text=f"{secs}s")
+            save_settings()
+
+        dur_slider = tk.Scale(
+            dur_row, from_=3, to=60, orient=tk.HORIZONTAL,
+            variable=dur_var, command=on_dur_change,
+            bg=BG_BASE, fg=TEXT_SECONDARY, troughcolor=BG_SURFACE2,
+            activebackground=CYAN, highlightthickness=0,
+            sliderrelief=tk.FLAT, bd=0, font=(FONT_MONO, 7),
+            showvalue=False,
+        )
+        dur_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        tk.Label(body, text="click overlay to pin it and pause the timer",
+                 font=(FONT_MONO, 7), fg=TEXT_MUTED, bg=BG_BASE).pack(anchor=tk.W, pady=(4, 0))
+
     def _update_ss_hotkey_color(self):
         """Dim the screenshot shortcut label if current model has no vision."""
         if not self._ss_hotkey_label:
@@ -1861,6 +1933,38 @@ class ChatWindow(tk.Tk):
         self._switch_page("chat")
         self.input_box.focus_set()
 
+    def _set_generating(self, generating: bool):
+        self._is_generating = generating
+        if generating:
+            self.input_box.configure(state=tk.DISABLED)
+            self._send_btn.configure(text="◼", fg=RED)
+            self._send_btn.unbind("<Button-1>")
+            self._send_btn.unbind("<Enter>")
+            self._send_btn.unbind("<Leave>")
+            self._send_btn.bind("<Button-1>", lambda e: self._cancel_generation())
+            self._send_btn.bind("<Enter>",    lambda e: self._send_btn.configure(fg="#ff7777"))
+            self._send_btn.bind("<Leave>",    lambda e: self._send_btn.configure(fg=RED))
+        else:
+            self._cancel_event.clear()
+            self.input_box.configure(state=tk.NORMAL)
+            self._send_btn.configure(text="↑", fg=CYAN)
+            self._send_btn.unbind("<Button-1>")
+            self._send_btn.unbind("<Enter>")
+            self._send_btn.unbind("<Leave>")
+            self._send_btn.bind("<Button-1>", lambda e: self._send_text())
+            self._send_btn.bind("<Enter>",    lambda e: self._send_btn.configure(fg=CYAN_HOVER))
+            self._send_btn.bind("<Leave>",    lambda e: self._send_btn.configure(fg=CYAN))
+
+    def _cancel_generation(self):
+        self._cancel_event.set()
+        self.status_var.set("cancelled")
+        self.after(1500, lambda: self.status_var.set("")
+                   if self.status_var.get() == "cancelled" else None)
+        if self._current_bubble:
+            self._current_bubble.append("\n[cancelled]")
+            self._current_bubble = None
+        self._set_generating(False)
+
     def _clear_chat(self):
         if self.conversation:
             self._save_current_chat()
@@ -1892,6 +1996,7 @@ class ChatWindow(tk.Tk):
             return "break"
 
     def _send_text(self):
+        if self._is_generating: return
         text = self.input_box.get("1.0", tk.END).strip()
         if not text: return
         self.input_box.delete("1.0", tk.END)
@@ -1905,14 +2010,19 @@ class ChatWindow(tk.Tk):
         # 1. Save to disk
         save_screenshot_to_disk(img, prompt)
 
-        # 2. Add thumbnail card to screenshots page (background, no console open)
+        # 2. Add thumbnail card to screenshots page
         ts = datetime.now().strftime("%H:%M")
         ss_thumb = img.copy(); ss_thumb.thumbnail((100, 70))
         card_photo = ImageTk.PhotoImage(ss_thumb)
         self._images.append(card_photo)
         self._add_screenshot_card(card_photo, prompt, ts)
 
-        # 3. Store in conversation silently (no bubble, no restore)
+        # 3. Add user bubble to chat showing the prompt
+        b = self._add_user_bubble("Screenshot")
+        b.append(f"[screenshot] {prompt}")
+        self._scroll_bottom()
+
+        # 4. Store in conversation
         b64 = pil_to_b64(img)
         self.conversation.append({
             "role": "user",
@@ -1925,13 +2035,19 @@ class ChatWindow(tk.Tk):
             ]
         })
 
-        # 4. Stream response to overlay only — console stays minimised
+        # 5. Stream to overlay + chat console (window stays minimised)
         self._run_claude_overlay_only(self.conversation[:])
 
     def _run_claude_overlay_only(self, messages: list):
-        """Run Claude and stream result to overlay only — console stays hidden."""
+        """Stream Claude to both the overlay popup AND the chat console."""
+        if self._is_generating:
+            return
+        self._set_generating(True)
         overlay = self._new_overlay()
         overlay.append("thinking...")
+        ab = self._add_assistant_bubble()
+        self._current_bubble = ab
+        cancel = self._cancel_event
 
         def worker():
             try:
@@ -1942,15 +2058,16 @@ class ChatWindow(tk.Tk):
                         msg_queue.put(("overlay_clear", None))
                         first[0] = False
                     full_reply.append(chunk)
-                    msg_queue.put(("overlay_chunk", chunk))
-                ask_claude(messages, on_chunk=on_chunk)
-                # Append assistant reply to real conversation for context continuity
+                    msg_queue.put(("chunk", chunk))
+                ask_claude(messages, on_chunk=on_chunk, cancel_event=cancel)
                 reply_text = "".join(full_reply)
                 if reply_text:
                     self.conversation.append({"role": "assistant", "content": reply_text})
-                msg_queue.put(("overlay_done", None))
+                msg_queue.put(("done", None))
+            except _Cancelled:
+                msg_queue.put(("done", None))
             except Exception as e:
-                msg_queue.put(("overlay_error", str(e)))
+                msg_queue.put(("error", str(e)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1958,7 +2075,13 @@ class ChatWindow(tk.Tk):
         MAX_CHARS = 8000
         if len(text) > MAX_CHARS:
             text = text[:MAX_CHARS] + f"\n\n[truncated — {len(text) - MAX_CHARS} chars omitted]"
-        # Store in conversation silently — no bubble, no restore
+
+        # Add user bubble showing a preview of the highlighted text
+        preview = text[:120] + ("..." if len(text) > 120 else "")
+        b = self._add_user_bubble("Highlight")
+        b.append(f"[highlight] {preview}")
+        self._scroll_bottom()
+
         self.conversation.append({
             "role": "user",
             "content": (
@@ -1966,15 +2089,17 @@ class ChatWindow(tk.Tk):
                 "Please explain, summarise, answer, or help with it."
             )
         })
-        # Stream response to overlay only — console stays minimised
+        # Stream to overlay + chat console
         self._run_claude_overlay_only(self.conversation[:])
 
     def _run_claude(self):
+        self._set_generating(True)
         self.status_var.set("thinking...")
         ab = self._add_assistant_bubble()
         self._current_bubble = ab
         overlay = self._new_overlay()
         overlay.append("thinking...")
+        cancel = self._cancel_event
 
         def worker():
             try:
@@ -1984,8 +2109,11 @@ class ChatWindow(tk.Tk):
                         msg_queue.put(("overlay_clear", None))
                         first[0] = False
                     msg_queue.put(("chunk", chunk))
-                full = ask_claude(self.conversation, on_chunk=on_chunk)
+                full = ask_claude(self.conversation, on_chunk=on_chunk,
+                                  cancel_event=cancel)
                 self.conversation.append({"role": "assistant", "content": full})
+                msg_queue.put(("done", None))
+            except _Cancelled:
                 msg_queue.put(("done", None))
             except Exception as e:
                 msg_queue.put(("error", str(e)))
@@ -2008,6 +2136,7 @@ class ChatWindow(tk.Tk):
                 elif kind == "done":
                     self.status_var.set("")
                     self._current_bubble = None
+                    self._set_generating(False)
                 elif kind == "overlay_chunk":
                     if self._overlay and not self._overlay._dismissed:
                         self._overlay.append(data)
@@ -2027,6 +2156,7 @@ class ChatWindow(tk.Tk):
                 elif kind == "error":
                     msg = str(data)
                     self.status_var.set("")
+                    self._set_generating(False)
                     if "Session expired" in msg:
                         clear_auth()
                         self.destroy()
@@ -2043,7 +2173,9 @@ class ChatWindow(tk.Tk):
 
     def _open_mini_chat(self, note=None):
         def on_send(text):
-            # Store in conversation — no bubble, no restore
+            b = self._add_user_bubble("You")
+            b.append(text)
+            self._scroll_bottom()
             self.conversation.append({"role": "user", "content": text})
             self._run_claude_overlay_only(self.conversation[:])
         MiniChat(self, on_send, note=note)
@@ -2411,23 +2543,29 @@ class LoginScreen(tk.Tk):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    load_settings()  # load user preferences before any UI
+
     # Check for updates in background — never blocks startup
-    update_thread = threading.Thread(target=check_for_updates, daemon=True)
-    update_thread.start()
+    threading.Thread(target=check_for_updates, daemon=True).start()
 
     def launch_app():
         app = ChatWindow()
+
+        # Validate tokens in background — don't block the window opening
+        def _bg_validate():
+            if not refresh_access_token():
+                clear_auth()
+                app.after(0, lambda: (
+                    app.destroy(),
+                    LoginScreen(on_complete=lambda: ChatWindow().mainloop()).mainloop()
+                ))
+        threading.Thread(target=_bg_validate, daemon=True).start()
+
         app.mainloop()
 
-    # Try loading saved tokens first
     if load_auth():
-        # Validate by refreshing — if it works, go straight to app
-        if refresh_access_token():
-            launch_app()
-        else:
-            clear_auth()
-            login = LoginScreen(on_complete=launch_app)
-            login.mainloop()
+        # Open app immediately — token refresh happens in background
+        launch_app()
     else:
         login = LoginScreen(on_complete=launch_app)
         login.mainloop()
