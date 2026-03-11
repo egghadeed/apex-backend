@@ -1075,7 +1075,9 @@ def _render_math_image(expr: str, display: bool, bg: str) -> "ImageTk.PhotoImage
         fig.clf()
 
         return ImageTk.PhotoImage(Image.open(buf).convert("RGBA"))
-    except Exception:
+    except Exception as _e:
+        import sys as _sys
+        print(f"[LaTeX] render failed for {expr!r}: {_e}", file=_sys.stderr)
         return None
 
 
@@ -2763,6 +2765,8 @@ class ChatWindow(tk.Tk):
                         self._scroll_bottom()
                     self._current_bubble = None
                     self._set_generating(False)
+                    if self._overlay and not self._overlay._dismissed:
+                        self._overlay.render_math()
                 elif kind == "overlay_chunk":
                     if self._overlay and not self._overlay._dismissed:
                         self._overlay.append(data)
