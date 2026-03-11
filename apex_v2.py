@@ -72,9 +72,10 @@ _hotkeys: dict = {
     "quit":       "q",
     "voice":      "v",   # for Task 5
 }
+_overlay_followup: bool = True
 
 def load_settings():
-    global _overlay_duration_ms, _custom_system_prompt
+    global _overlay_duration_ms, _custom_system_prompt, _overlay_followup
     try:
         if os.path.exists(SETTINGS_FILE):
             with open(SETTINGS_FILE) as f:
@@ -86,6 +87,7 @@ def load_settings():
             for k in _hotkeys:
                 if k in loaded_hk and len(str(loaded_hk[k])) == 1:
                     _hotkeys[k] = str(loaded_hk[k]).lower()
+            _overlay_followup = bool(data.get("overlay_followup", True))
     except Exception:
         pass
 
@@ -94,7 +96,8 @@ def save_settings():
         with open(SETTINGS_FILE, "w") as f:
             json.dump({"overlay_duration_ms": _overlay_duration_ms,
                        "custom_system_prompt": _custom_system_prompt,
-                       "hotkeys": _hotkeys}, f)
+                       "hotkeys": _hotkeys,
+                       "overlay_followup": _overlay_followup}, f)
     except Exception:
         pass
 
@@ -469,13 +472,14 @@ def ask_claude(messages: list, on_chunk=None,
 class FloatingOverlay(tk.Toplevel):
     AUTO_CLOSE_MS = 8000  # fallback default
 
-    def __init__(self, master):
+    def __init__(self, master, on_followup=None):
         super().__init__(master)
         self._dismissed  = False
         self._pinned     = False   # click to pin — pauses timer, hides countdown
         self._remaining  = _overlay_duration_ms
         self._drag_x     = 0
         self._drag_y     = 0
+        self._on_followup = on_followup
 
         self.overrideredirect(True)
         self.attributes("-topmost", True)
@@ -544,6 +548,37 @@ class FloatingOverlay(tk.Toplevel):
             w.bind("<Button-1>",        self._on_click,      add="+")
             w.bind("<ButtonPress-1>",   self._drag_start,    add="+")
             w.bind("<B1-Motion>",       self._drag_motion,   add="+")
+
+        if _overlay_followup and on_followup:
+            tk.Frame(self._body, bg=BORDER, height=1).pack(fill=tk.X)
+            followup_frame = tk.Frame(self._body, bg=BG_BASE, padx=10, pady=6)
+            followup_frame.pack(fill=tk.X)
+
+            input_row = tk.Frame(followup_frame, bg=BG_SURFACE2,
+                                 highlightthickness=1, highlightbackground=BORDER)
+            input_row.pack(fill=tk.X)
+
+            self._followup_entry = tk.Entry(
+                input_row, bg=BG_SURFACE2, fg=TEXT_PRIMARY,
+                font=(FONT_MONO, 9), relief=tk.FLAT,
+                insertbackground=CYAN,
+            )
+            self._followup_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8, pady=5)
+            self._followup_entry.insert(0, "follow up...")
+            self._followup_entry.bind("<FocusIn>",
+                lambda e: self._followup_entry.delete(0, tk.END)
+                    if self._followup_entry.get() == "follow up..." else None)
+            self._followup_entry.bind("<FocusOut>",
+                lambda e: self._followup_entry.insert(0, "follow up...")
+                    if not self._followup_entry.get().strip() else None)
+
+            send_fu = tk.Label(input_row, text="↑", font=(FONT_MONO, 10, "bold"),
+                               fg=CYAN, bg=BG_SURFACE2, cursor="hand2", padx=6)
+            send_fu.pack(side=tk.RIGHT)
+            send_fu.bind("<Button-1>", lambda e: self._submit_followup())
+
+            self._followup_entry.bind("<Return>", lambda e: self._submit_followup())
+            self._followup_entry.bind("<Escape>", lambda e: self._dismiss())
 
         self._tick()
 
@@ -628,6 +663,13 @@ class FloatingOverlay(tk.Toplevel):
             if self._remaining <= 0:
                 self._dismiss(); return
         self.after(250, self._tick)
+
+    def _submit_followup(self):
+        text = self._followup_entry.get().strip()
+        if not text or text == "follow up...": return
+        self._dismiss()
+        if self._on_followup:
+            self._on_followup(text)
 
     def _dismiss(self):
         self._dismissed = True
@@ -1919,6 +1961,22 @@ class ChatWindow(tk.Tk):
         tk.Label(body, text="click overlay to pin it and pause the timer",
                  font=(FONT_MONO, 7), fg=TEXT_MUTED, bg=BG_BASE).pack(anchor=tk.W, pady=(4, 0))
 
+        fu_var = tk.BooleanVar(value=_overlay_followup)
+
+        def toggle_followup():
+            global _overlay_followup
+            _overlay_followup = fu_var.get()
+            save_settings()
+
+        fu_cb = tk.Checkbutton(
+            body, text="  show follow-up input on popup",
+            variable=fu_var, command=toggle_followup,
+            bg=BG_BASE, fg=TEXT_SECONDARY, activebackground=BG_BASE,
+            activeforeground=TEXT_PRIMARY, selectcolor=BG_SURFACE2,
+            font=(FONT_MONO, 8), cursor="hand2",
+        )
+        fu_cb.pack(anchor=tk.W, pady=(10, 0))
+
         tk.Frame(body, bg=BORDER, height=1).pack(fill=tk.X, pady=(12, 0))
         section_label("SYSTEM PROMPT")
 
@@ -2207,9 +2265,16 @@ class ChatWindow(tk.Tk):
         if self._overlay and not self._overlay._dismissed:
             try: self._overlay._dismiss()
             except: pass
-        ov = FloatingOverlay(self)
+        ov = FloatingOverlay(self, on_followup=self._handle_overlay_followup)
         self._overlay = ov
         return ov
+
+    def _handle_overlay_followup(self, text: str):
+        b = self._add_user_bubble("You")
+        b.append(text)
+        self._scroll_bottom()
+        self.conversation.append({"role": "user", "content": text})
+        self._run_claude_overlay_only(self.conversation[:])
 
     def _on_enter(self, event):
         if not event.state & 0x1:
