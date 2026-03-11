@@ -63,7 +63,7 @@ AUTH_FILE        = os.path.join(os.path.expanduser("~"), ".apex_auth")
 SETTINGS_FILE    = os.path.join(os.path.expanduser("~"), ".apex_settings")
 
 # ── User-configurable settings ────────────────────────────────────────────────
-_overlay_duration_ms: int = 8000   # popup auto-close duration (ms)
+_overlay_duration_ms: int = 5000   # popup auto-close duration (ms)
 _custom_system_prompt: str = ""  # empty = use backend default
 _hotkeys: dict = {
     "screenshot": "s",
@@ -80,8 +80,8 @@ def load_settings():
         if os.path.exists(SETTINGS_FILE):
             with open(SETTINGS_FILE) as f:
                 data = json.load(f)
-            _overlay_duration_ms = max(3000, min(60000,
-                int(data.get("overlay_duration_ms", 8000))))
+            _overlay_duration_ms = max(1000, min(30000,
+                int(data.get("overlay_duration_ms", 5000))))
             _custom_system_prompt = str(data.get("custom_system_prompt", ""))
             loaded_hk = data.get("hotkeys", {})
             for k in _hotkeys:
@@ -600,37 +600,6 @@ class FloatingOverlay(tk.Toplevel):
             w.bind("<Button-1>",        self._on_click,      add="+")
             w.bind("<ButtonPress-1>",   self._drag_start,    add="+")
             w.bind("<B1-Motion>",       self._drag_motion,   add="+")
-
-        if _overlay_followup and on_followup:
-            tk.Frame(self._body, bg=BORDER, height=1).pack(fill=tk.X)
-            followup_frame = tk.Frame(self._body, bg=BG_BASE, padx=10, pady=6)
-            followup_frame.pack(fill=tk.X)
-
-            input_row = tk.Frame(followup_frame, bg=BG_SURFACE2,
-                                 highlightthickness=1, highlightbackground=BORDER)
-            input_row.pack(fill=tk.X)
-
-            self._followup_entry = tk.Entry(
-                input_row, bg=BG_SURFACE2, fg=TEXT_PRIMARY,
-                font=(FONT_MONO, 9), relief=tk.FLAT,
-                insertbackground=CYAN,
-            )
-            self._followup_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8, pady=5)
-            self._followup_entry.insert(0, "follow up...")
-            self._followup_entry.bind("<FocusIn>",
-                lambda e: self._followup_entry.delete(0, tk.END)
-                    if self._followup_entry.get() == "follow up..." else None)
-            self._followup_entry.bind("<FocusOut>",
-                lambda e: self._followup_entry.insert(0, "follow up...")
-                    if not self._followup_entry.get().strip() else None)
-
-            send_fu = tk.Label(input_row, text="↑", font=(FONT_MONO, 10, "bold"),
-                               fg=CYAN, bg=BG_SURFACE2, cursor="hand2", padx=6)
-            send_fu.pack(side=tk.RIGHT)
-            send_fu.bind("<Button-1>", lambda e: self._submit_followup())
-
-            self._followup_entry.bind("<Return>", lambda e: self._submit_followup())
-            self._followup_entry.bind("<Escape>", lambda e: self._dismiss())
 
         self._tick()
 
@@ -2149,7 +2118,7 @@ class ChatWindow(tk.Tk):
             save_settings()
 
         dur_slider = tk.Scale(
-            dur_row, from_=3, to=60, orient=tk.HORIZONTAL,
+            dur_row, from_=1, to=30, orient=tk.HORIZONTAL,
             variable=dur_var, command=on_dur_change,
             bg=BG_BASE, fg=TEXT_SECONDARY, troughcolor=BG_SURFACE2,
             activebackground=CYAN, highlightthickness=0,
@@ -2160,22 +2129,6 @@ class ChatWindow(tk.Tk):
 
         tk.Label(body, text="click overlay to pin it and pause the timer",
                  font=(FONT_MONO, 7), fg=TEXT_MUTED, bg=BG_BASE).pack(anchor=tk.W, pady=(4, 0))
-
-        fu_var = tk.BooleanVar(value=_overlay_followup)
-
-        def toggle_followup():
-            global _overlay_followup
-            _overlay_followup = fu_var.get()
-            save_settings()
-
-        fu_cb = tk.Checkbutton(
-            body, text="  show follow-up input on popup",
-            variable=fu_var, command=toggle_followup,
-            bg=BG_BASE, fg=TEXT_SECONDARY, activebackground=BG_BASE,
-            activeforeground=TEXT_PRIMARY, selectcolor=BG_SURFACE2,
-            font=(FONT_MONO, 8), cursor="hand2",
-        )
-        fu_cb.pack(anchor=tk.W, pady=(10, 0))
 
         tk.Frame(body, bg=BORDER, height=1).pack(fill=tk.X, pady=(12, 0))
         section_label("SYSTEM PROMPT")
