@@ -620,9 +620,9 @@ class FloatingOverlay(tk.Toplevel):
         drag_targets = [self, self._body, topbar, dot_c, txt_frame, self._text,
                         self._prog_canvas, self._pin_lbl]
         for w in drag_targets:
-            w.bind("<Button-1>",        self._on_click,      add="+")
             w.bind("<ButtonPress-1>",   self._drag_start,    add="+")
             w.bind("<B1-Motion>",       self._drag_motion,   add="+")
+            w.bind("<ButtonRelease-1>", self._on_click,      add="+")
 
         self._tick()
 
@@ -630,7 +630,9 @@ class FloatingOverlay(tk.Toplevel):
 
     def _on_click(self, event):
         # Only toggle pin on a clean click (not drag)
-        if getattr(self, "_dragging", False):
+        was_dragging = getattr(self, "_dragging", False)
+        self._dragging = False   # reset for next interaction
+        if was_dragging:
             return
         self._pinned = not self._pinned
         if self._pinned:
