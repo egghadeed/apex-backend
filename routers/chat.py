@@ -35,6 +35,7 @@ class Message(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[Message]
     model: Optional[str] = None   # client may request a specific model
+    system: Optional[str] = None   # client-supplied system prompt override
 
 
 def _resolve_model(requested: str | None, tier: str) -> str:
@@ -90,7 +91,7 @@ def _convert_messages_for_openai(messages: list[dict], model: str) -> list[dict]
     return converted
 
 
-def _stream_openai(model: str, messages: list[dict]):
+def _stream_openai(model: str, messages: list[dict], system: str = None):
     """Yield SSE chunks from OpenAI streaming API."""
     from openai import OpenAI
     client = OpenAI(api_key=OPENAI_API_KEY)
@@ -106,7 +107,7 @@ def _stream_openai(model: str, messages: list[dict]):
         kwargs["max_completion_tokens"] = 2048
     else:
         kwargs["max_tokens"] = 2048
-        kwargs["messages"]   = [{"role": "system", "content": SYSTEM_PROMPT}] + oai_messages
+        kwargs["messages"]   = [{"role": "system", "content": system or SYSTEM_PROMPT}] + oai_messages
 
     input_tokens = output_tokens = 0
 
@@ -125,7 +126,7 @@ def _stream_openai(model: str, messages: list[dict]):
         yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
 
-def _stream_anthropic(model: str, messages: list[dict]):
+def _stream_anthropic(model: str, messages: list[dict], system: str = None):
     """Yield SSE chunks from Anthropic streaming API."""
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     input_tokens = output_tokens = 0
@@ -133,7 +134,7 @@ def _stream_anthropic(model: str, messages: list[dict]):
         with client.messages.stream(
             model=model,
             max_tokens=2048,
-            system=SYSTEM_PROMPT,
+            system=system or SYSTEM_PROMPT,
             messages=messages,
         ) as stream:
             for text in stream.text_stream:
@@ -155,14 +156,15 @@ def stream_chat(
 ):
     tier  = user.get("tier", "free")
     model = _resolve_model(body.model, tier)
+    system_prompt = body.system if body.system else None
 
     raw_messages = [m.model_dump() for m in body.messages]
 
     def generate():
         if _is_openai(model):
-            gen = _stream_openai(model, raw_messages)
+            gen = _stream_openai(model, raw_messages, system=system_prompt)
         else:
-            gen = _stream_anthropic(model, raw_messages)
+            gen = _stream_anthropic(model, raw_messages, system=system_prompt)
 
         input_tokens = output_tokens = 0
         for chunk in gen:

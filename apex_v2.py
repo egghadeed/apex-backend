@@ -64,22 +64,25 @@ SETTINGS_FILE    = os.path.join(os.path.expanduser("~"), ".apex_settings")
 
 # ── User-configurable settings ────────────────────────────────────────────────
 _overlay_duration_ms: int = 8000   # popup auto-close duration (ms)
+_custom_system_prompt: str = ""  # empty = use backend default
 
 def load_settings():
-    global _overlay_duration_ms
+    global _overlay_duration_ms, _custom_system_prompt
     try:
         if os.path.exists(SETTINGS_FILE):
             with open(SETTINGS_FILE) as f:
                 data = json.load(f)
             _overlay_duration_ms = max(3000, min(60000,
                 int(data.get("overlay_duration_ms", 8000))))
+            _custom_system_prompt = str(data.get("custom_system_prompt", ""))
     except Exception:
         pass
 
 def save_settings():
     try:
         with open(SETTINGS_FILE, "w") as f:
-            json.dump({"overlay_duration_ms": _overlay_duration_ms}, f)
+            json.dump({"overlay_duration_ms": _overlay_duration_ms,
+                       "custom_system_prompt": _custom_system_prompt}, f)
     except Exception:
         pass
 
@@ -389,6 +392,8 @@ def ask_claude(messages: list, on_chunk=None,
     payload  = {"messages": messages}
     if _preferred_model:
         payload["model"] = _preferred_model
+    if _custom_system_prompt:
+        payload["system"] = _custom_system_prompt
     body = json.dumps(payload).encode()
 
     def do_request(token: str) -> urllib.request.Request:
@@ -1806,6 +1811,42 @@ class ChatWindow(tk.Tk):
 
         tk.Label(body, text="click overlay to pin it and pause the timer",
                  font=(FONT_MONO, 7), fg=TEXT_MUTED, bg=BG_BASE).pack(anchor=tk.W, pady=(4, 0))
+
+        tk.Frame(body, bg=BORDER, height=1).pack(fill=tk.X, pady=(12, 0))
+        section_label("SYSTEM PROMPT")
+
+        tk.Label(body,
+                 text="custom instructions sent with every message\n(leave blank to use default)",
+                 font=(FONT_MONO, 7), fg=TEXT_MUTED, bg=BG_BASE,
+                 justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 6))
+
+        sp_frame = tk.Frame(body, bg=BG_SURFACE2,
+                            highlightthickness=1, highlightbackground=BORDER)
+        sp_frame.pack(fill=tk.X, pady=(0, 6))
+
+        sp_box = tk.Text(sp_frame, height=4, wrap=tk.WORD,
+                         bg=BG_SURFACE2, fg=TEXT_PRIMARY,
+                         font=(FONT_MONO, 9), relief=tk.FLAT,
+                         insertbackground=CYAN, padx=8, pady=6)
+        sp_box.pack(fill=tk.X)
+        if _custom_system_prompt:
+            sp_box.insert("1.0", _custom_system_prompt)
+
+        sp_status = tk.Label(body, text="", font=(FONT_MONO, 7), fg=CYAN, bg=BG_BASE)
+        sp_status.pack(anchor=tk.W)
+
+        def save_sp(_=None):
+            global _custom_system_prompt
+            _custom_system_prompt = sp_box.get("1.0", tk.END).strip()
+            save_settings()
+            sp_status.configure(text="saved")
+            body.after(1500, lambda: sp_status.configure(text=""))
+
+        sp_save = tk.Label(body, text="  save prompt  ",
+                           font=(FONT_MONO, 8), fg=BG_BASE, bg=CYAN,
+                           cursor="hand2", padx=8, pady=4)
+        sp_save.pack(anchor=tk.W, pady=(4, 0))
+        sp_save.bind("<Button-1>", save_sp)
 
     def _update_ss_hotkey_color(self):
         """Dim the screenshot shortcut label if current model has no vision."""
