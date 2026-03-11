@@ -2123,9 +2123,9 @@ class ChatWindow(tk.Tk):
             bg=BG_BASE, fg=TEXT_SECONDARY, troughcolor=BG_SURFACE2,
             activebackground=CYAN, highlightthickness=0,
             sliderrelief=tk.FLAT, bd=0, font=(FONT_MONO, 7),
-            showvalue=False,
+            showvalue=False, length=200,
         )
-        dur_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        dur_slider.pack(side=tk.LEFT)
 
         tk.Label(body, text="click overlay to pin it and pause the timer",
                  font=(FONT_MONO, 7), fg=TEXT_MUTED, bg=BG_BASE).pack(anchor=tk.W, pady=(4, 0))
