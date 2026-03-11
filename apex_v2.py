@@ -1084,16 +1084,25 @@ class MessageBubble(tk.Frame):
         content = self._text.get("1.0", tk.END)
 
         # Match $$...$$ (display) first, then $...$ (inline)
-        pattern = re.compile(r'\$\$([\s\S]+?)\$\$|\$([^\$\n]+?)\$')
+        pattern = re.compile(
+            r'\$\$([\s\S]+?)\$\$'          # $$...$$  display
+            r'|\\\[([\s\S]+?)\\\]'          # \[...\]  display
+            r'|\$([^\$\n]+?)\$'            # $...$    inline
+            r'|\\\(([^\n]+?)\\\)'           # \(...\)  inline
+        )
         segments = []
         last = 0
         for m in pattern.finditer(content):
             if m.start() > last:
                 segments.append(("text", content[last:m.start()]))
-            if m.group(1) is not None:
+            if m.group(1) is not None:       # $$...$$
                 segments.append(("display", m.group(1).strip()))
-            else:
-                segments.append(("inline", m.group(2).strip()))
+            elif m.group(2) is not None:     # \[...\]
+                segments.append(("display", m.group(2).strip()))
+            elif m.group(3) is not None:     # $...$
+                segments.append(("inline", m.group(3).strip()))
+            else:                            # \(...\)
+                segments.append(("inline", m.group(4).strip()))
             last = m.end()
         if last < len(content):
             segments.append(("text", content[last:]))
