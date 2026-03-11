@@ -45,7 +45,7 @@ SYSTEM = (
     "You are Apex, a helpful desktop AI assistant. "
     "You can see screenshots and read text the user highlights. "
     "Be concise but thorough when directed. "
-    "In general, answer questions with minimal working."
+    "In general, answer questions with minimal working, any math should have ($_$) around them."
 )
 
 import json
@@ -1193,8 +1193,18 @@ class ChatWindow(tk.Tk):
                 "available_models": profile.get("available_models", []),
             })
             save_auth(_access_token, _refresh_token, _user_info)
+            self.after(0, self._rebuild_settings_page)
         except Exception:
             pass
+
+    def _rebuild_settings_page(self):
+        """Tear down and rebuild the settings page so model list reflects fetched profile."""
+        frame = self._pages.get("settings")
+        if not frame:
+            return
+        for child in frame.winfo_children():
+            child.destroy()
+        self._build_settings_page(frame)
 
     def _set_taskbar_title_and_icon(self):
         """Set taskbar title and icon. Uses embedded PNG so no external file needed."""
