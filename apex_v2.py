@@ -1350,7 +1350,45 @@ class ChatWindow(tk.Tk):
                  font=(FONT_MONO, 8), fg=TEXT_MUTED,
                  bg=BG_BASE).pack(side=tk.LEFT, padx=10)
 
+        search_btn = tk.Label(hdr, text="⌕", font=(FONT_MONO, 10),
+                              fg=TEXT_MUTED, bg=BG_BASE, cursor="hand2", padx=6)
+        search_btn.pack(side=tk.RIGHT)
+        search_btn.bind("<Button-1>", lambda e: self._toggle_search())
+        search_btn.bind("<Enter>", lambda e: search_btn.configure(fg=CYAN))
+        search_btn.bind("<Leave>", lambda e: search_btn.configure(fg=TEXT_MUTED))
+
         tk.Frame(container, bg=BORDER, height=1).pack(fill=tk.X)
+
+        # Search bar (hidden by default)
+        self._search_frame = tk.Frame(container, bg=BG_SURFACE, padx=12, pady=6)
+        # NOT packed yet — toggled by button
+
+        search_input_frame = tk.Frame(self._search_frame, bg=BG_SURFACE2,
+                                       highlightthickness=1, highlightbackground=BORDER)
+        search_input_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self._search_var = tk.StringVar()
+        self._search_entry = tk.Entry(
+            search_input_frame, textvariable=self._search_var,
+            bg=BG_SURFACE2, fg=TEXT_PRIMARY, font=(FONT_MONO, 9),
+            relief=tk.FLAT, insertbackground=CYAN, padx=8, pady=5,
+        )
+        self._search_entry.pack(fill=tk.X)
+        self._search_entry.bind("<Return>",    lambda e: self._do_search())
+        self._search_entry.bind("<Escape>",    lambda e: self._clear_search())
+        self._search_entry.bind("<KeyRelease>", lambda e: self._do_search())
+
+        self._search_status = tk.Label(self._search_frame,
+            text="", font=(FONT_MONO, 7), fg=TEXT_MUTED,
+            bg=BG_SURFACE, padx=8)
+        self._search_status.pack(side=tk.LEFT)
+
+        close_s = tk.Label(self._search_frame, text="×", font=(FONT_MONO, 10),
+                           fg=TEXT_MUTED, bg=BG_SURFACE, cursor="hand2", padx=6)
+        close_s.pack(side=tk.RIGHT)
+        close_s.bind("<Button-1>", lambda e: self._clear_search())
+
+        self._search_visible = False
 
         chat_area = tk.Frame(container, bg=BG_BASE)
         chat_area.pack(fill=tk.BOTH, expand=True)
@@ -1378,6 +1416,61 @@ class ChatWindow(tk.Tk):
         self._empty_label.pack(expand=True, pady=4)
 
         self._build_chat_bottom(container)
+
+    def _toggle_search(self):
+        self._search_visible = not self._search_visible
+        if self._search_visible:
+            # Pack search bar right after the header separator
+            children = list(self._search_frame.master.winfo_children())
+            # Find the separator (height=1 frame) and insert after it
+            sep_idx = next(
+                (i for i, w in enumerate(children)
+                 if isinstance(w, tk.Frame) and w.cget("height") == 1),
+                0
+            )
+            if sep_idx + 1 < len(children):
+                self._search_frame.pack(fill=tk.X, before=children[sep_idx + 1])
+            else:
+                self._search_frame.pack(fill=tk.X)
+            self._search_entry.focus_set()
+        else:
+            self._clear_search()
+
+    def _do_search(self):
+        query = self._search_var.get().strip().lower()
+        if not query:
+            self._search_status.configure(text="")
+            return
+        matches = [
+            i for i, m in enumerate(self.conversation)
+            if query in (
+                m["content"] if isinstance(m["content"], str)
+                else " ".join(p.get("text", "") for p in m["content"]
+                              if isinstance(p, dict) and p.get("type") == "text")
+            ).lower()
+        ]
+        self._search_status.configure(
+            text=f"{len(matches)} match{'es' if len(matches) != 1 else ''}"
+        )
+        if matches:
+            children = [w for w in self._msg_frame.winfo_children()
+                        if isinstance(w, MessageBubble)]
+            if matches[0] < len(children):
+                target = children[matches[0]]
+                self._canvas.update_idletasks()
+                frame_h = self._msg_frame.winfo_height()
+                target_y = target.winfo_y()
+                if frame_h > 0:
+                    self._canvas.yview_moveto(target_y / frame_h)
+
+    def _clear_search(self):
+        self._search_visible = False
+        self._search_var.set("")
+        self._search_status.configure(text="")
+        try:
+            self._search_frame.pack_forget()
+        except Exception:
+            pass
 
     def _build_history_page(self, container):
         hdr = tk.Frame(container, bg=BG_BASE, padx=20, pady=14)
