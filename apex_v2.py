@@ -45,7 +45,7 @@ SYSTEM = (
     "You are Apex, a helpful desktop AI assistant. "
     "You can see screenshots and read text the user highlights. "
     "Be concise but thorough when directed. "
-    "In general, answer questions with minimal working, any math should have ($_$) around them."
+    "In general, answer questions with minimal working."
 )
 
 import json
@@ -2950,6 +2950,9 @@ class LoginScreen(tk.Tk):
         self._email.pack(fill=tk.X, padx=10, pady=7)
         self._email.bind("<FocusIn>",  lambda e: email_frame.configure(highlightbackground=CYAN))
         self._email.bind("<FocusOut>", lambda e: email_frame.configure(highlightbackground=BORDER))
+        saved_email = _user_info.get("email", "")
+        if saved_email:
+            self._email.insert(0, saved_email)
 
         # Password
         tk.Label(body, text="PASSWORD", font=(FONT_MONO, 7, "bold"),
@@ -2964,6 +2967,8 @@ class LoginScreen(tk.Tk):
         self._password.bind("<FocusIn>",  lambda e: pw_frame.configure(highlightbackground=CYAN))
         self._password.bind("<FocusOut>", lambda e: pw_frame.configure(highlightbackground=BORDER))
         self._password.bind("<Return>",   lambda e: self._do_login())
+        if saved_email:
+            self.after(50, self._password.focus_set)
 
         # Buttons row
         btn_row = tk.Frame(body, bg=BG_BASE)
