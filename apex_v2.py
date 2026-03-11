@@ -1896,13 +1896,19 @@ class ChatWindow(tk.Tk):
         def save_hotkeys(_=None):
             global _hotkeys
             used = set()
+            skipped = []
             for action, ent in hk_entries.items():
                 val = ent.get().strip()[:1].lower()
                 if val and val not in used:
                     _hotkeys[action] = val
                     used.add(val)
+                elif val:
+                    skipped.append(action)
             save_settings()
-            hk_status.configure(text="saved — restart hotkey listener to apply")
+            if skipped:
+                hk_status.configure(text=f"saved — duplicate key ignored: {', '.join(skipped)}")
+            else:
+                hk_status.configure(text="saved")
             body.after(2500, lambda: hk_status.configure(text=""))
 
         hk_save = tk.Label(body, text="  save hotkeys  ",
