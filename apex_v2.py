@@ -1897,13 +1897,21 @@ class ChatWindow(tk.Tk):
             global _hotkeys
             used = set()
             skipped = []
+            new_hk = dict(_hotkeys)
             for action, ent in hk_entries.items():
                 val = ent.get().strip()[:1].lower()
-                if val and val not in used:
-                    _hotkeys[action] = val
+                if not val:
+                    # blank — keep existing key, restore it in the entry to match reality
+                    existing = _hotkeys.get(action, "")
+                    ent.delete(0, tk.END)
+                    ent.insert(0, existing)
+                    used.add(existing)
+                elif val not in used:
+                    new_hk[action] = val
                     used.add(val)
-                elif val:
+                else:
                     skipped.append(action)
+            _hotkeys = new_hk  # single atomic swap — GIL-safe for listener thread
             save_settings()
             if skipped:
                 hk_status.configure(text=f"saved — duplicate key ignored: {', '.join(skipped)}")
