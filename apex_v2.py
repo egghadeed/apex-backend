@@ -80,14 +80,42 @@ _hotkeys: dict = {
     "highlight":  "h",
     "chat":       "a",
     "quit":       "q",
-    "voice":      "v",   # for Task 5
+    "voice":      "v",
 }
 _overlay_followup: bool = True
+_autostart: bool = True
+
+# ── Windows auto-start (registry) ─────────────────────────────────────────────
+_AUTOSTART_REG_KEY  = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_AUTOSTART_REG_NAME = "Apex Assistant"
+
+def _get_exe_path() -> str:
+    if getattr(sys, "frozen", False):
+        return sys.executable
+    return os.path.abspath(sys.argv[0])
+
+def _apply_autostart(enabled: bool):
+    """Write or remove the Run registry entry for auto-start on login."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _AUTOSTART_REG_KEY,
+                            0, winreg.KEY_SET_VALUE) as key:
+            if enabled:
+                winreg.SetValueEx(key, _AUTOSTART_REG_NAME, 0,
+                                  winreg.REG_SZ, f'"{_get_exe_path()}"')
+            else:
+                try:
+                    winreg.DeleteValue(key, _AUTOSTART_REG_NAME)
+                except FileNotFoundError:
+                    pass
+    except Exception:
+        pass
 
 def load_settings():
-    global _overlay_duration_ms, _custom_system_prompt, _overlay_followup
+    global _overlay_duration_ms, _custom_system_prompt, _overlay_followup, _autostart
+    first_run = not os.path.exists(SETTINGS_FILE)
     try:
-        if os.path.exists(SETTINGS_FILE):
+        if not first_run:
             with open(SETTINGS_FILE) as f:
                 data = json.load(f)
             _overlay_duration_ms = max(1000, min(30000,
@@ -98,16 +126,23 @@ def load_settings():
                 if k in loaded_hk and len(str(loaded_hk[k])) == 1:
                     _hotkeys[k] = str(loaded_hk[k]).lower()
             _overlay_followup = bool(data.get("overlay_followup", True))
+            _autostart = bool(data.get("autostart", True))
     except Exception:
         pass
+    # On first run, write the registry entry so autostart is on by default
+    if first_run:
+        _apply_autostart(True)
 
 def save_settings():
+    global _autostart
     try:
         with open(SETTINGS_FILE, "w") as f:
             json.dump({"overlay_duration_ms": _overlay_duration_ms,
                        "custom_system_prompt": _custom_system_prompt,
                        "hotkeys": _hotkeys,
-                       "overlay_followup": _overlay_followup}, f)
+                       "overlay_followup": _overlay_followup,
+                       "autostart": _autostart}, f)
+        _apply_autostart(_autostart)
     except Exception:
         pass
 
@@ -2185,6 +2220,29 @@ class ChatWindow(tk.Tk):
                                              so_outer.configure(bg=RED)))
         so_btn.bind("<Leave>",    lambda e: (so_btn.configure(bg=BG_BASE, fg=TEXT_SECONDARY),
                                              so_outer.configure(bg=BORDER)))
+
+        # STARTUP section
+        tk.Frame(body, bg=BORDER, height=1).pack(fill=tk.X, pady=(0, 0))
+        section_label("STARTUP")
+
+        as_var = tk.BooleanVar(value=_autostart)
+
+        def _toggle_autostart():
+            global _autostart
+            _autostart = as_var.get()
+            save_settings()
+
+        as_row = tk.Frame(body, bg=BG_BASE)
+        as_row.pack(anchor=tk.W, pady=(0, 4))
+        tk.Checkbutton(
+            as_row, text="Launch on Windows login",
+            variable=as_var, command=_toggle_autostart,
+            font=(FONT_MONO, 9), fg=TEXT_PRIMARY, bg=BG_BASE,
+            activeforeground=TEXT_PRIMARY, activebackground=BG_BASE,
+            selectcolor=BG_SURFACE2,
+            relief=tk.FLAT, bd=0, highlightthickness=0,
+        ).pack(side=tk.LEFT)
+        tk.Frame(body, bg=BG_BASE, height=12).pack()
 
         # MODEL section
         tk.Frame(body, bg=BORDER, height=1).pack(fill=tk.X, pady=(0, 0))
