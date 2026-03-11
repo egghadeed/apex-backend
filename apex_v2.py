@@ -1062,6 +1062,12 @@ class MessageBubble(tk.Frame):
         self._text.configure(height=max(lines, 8), state=tk.DISABLED)
 
 
+class ChatSession:
+    def __init__(self, name: str = "Chat 1"):
+        self.name = name
+        self.conversation: list = []
+
+
 # ── Main Chat Window ──────────────────────────────────────────────────────────
 
 class ChatWindow(tk.Tk):
@@ -1087,7 +1093,8 @@ class ChatWindow(tk.Tk):
         self._drag_y = 0
         self._resizing = False
 
-        self.conversation: list = []
+        self._sessions:       list = [ChatSession("Chat 1")]
+        self._active_session: int  = 0
         self._overlay: FloatingOverlay | None = None
         self._current_bubble: MessageBubble | None = None
         self._images = []
@@ -1434,6 +1441,16 @@ class ChatWindow(tk.Tk):
             builder(frame)
             self._pages[name] = frame
 
+    # ── Session-aware conversation property ───────────────────────────────────
+
+    @property
+    def conversation(self) -> list:
+        return self._sessions[self._active_session].conversation
+
+    @conversation.setter
+    def conversation(self, val: list):
+        self._sessions[self._active_session].conversation = val
+
     # ── Chat page ─────────────────────────────────────────────────────────────
 
     def _build_chat_page(self, container):
@@ -1487,6 +1504,12 @@ class ChatWindow(tk.Tk):
 
         self._search_visible = False
 
+        self._tab_bar = tk.Frame(container, bg=BG_SIDEBAR, height=30)
+        self._tab_bar.pack(fill=tk.X)
+        self._tab_bar.pack_propagate(False)
+        self._tab_widgets: list = []
+        self._refresh_tab_bar()
+
         chat_area = tk.Frame(container, bg=BG_BASE)
         chat_area.pack(fill=tk.BOTH, expand=True)
 
@@ -1513,6 +1536,94 @@ class ChatWindow(tk.Tk):
         self._empty_label.pack(expand=True, pady=4)
 
         self._build_chat_bottom(container)
+
+    def _refresh_tab_bar(self):
+        for w in self._tab_bar.winfo_children():
+            w.destroy()
+        self._tab_widgets.clear()
+
+        for i, session in enumerate(self._sessions):
+            is_active = (i == self._active_session)
+            btn_bg = CYAN_DIM if is_active else BG_SIDEBAR
+
+            btn_f = tk.Frame(self._tab_bar, bg=btn_bg, padx=10, pady=0)
+            btn_f.pack(side=tk.LEFT, fill=tk.Y)
+
+            if is_active:
+                tk.Frame(btn_f, bg=CYAN, height=2).pack(fill=tk.X)
+
+            lbl = tk.Label(btn_f, text=session.name,
+                           font=(FONT_MONO, 7),
+                           fg=TEXT_PRIMARY if is_active else TEXT_MUTED,
+                           bg=btn_bg, cursor="hand2", pady=4)
+            lbl.pack(side=tk.LEFT)
+
+            close_t = tk.Label(btn_f, text="×", font=(FONT_MONO, 8),
+                               fg=TEXT_MUTED, bg=btn_bg, cursor="hand2", padx=2)
+            close_t.pack(side=tk.LEFT)
+
+            idx = i  # capture
+            btn_f.bind("<Button-1>", lambda e, n=idx: self._switch_session(n))
+            lbl.bind("<Button-1>",   lambda e, n=idx: self._switch_session(n))
+            close_t.bind("<Button-1>", lambda e, n=idx: self._close_session(n))
+            close_t.bind("<Enter>", lambda e, w=close_t: w.configure(fg="#ff4d4d"))
+            close_t.bind("<Leave>", lambda e, w=close_t, bg=btn_bg: w.configure(fg=TEXT_MUTED))
+
+            self._tab_widgets.append((btn_f, lbl))
+
+        # "+" new tab button
+        plus = tk.Label(self._tab_bar, text=" + ", font=(FONT_MONO, 8),
+                        fg=TEXT_MUTED, bg=BG_SIDEBAR, cursor="hand2")
+        plus.pack(side=tk.LEFT, fill=tk.Y, padx=4)
+        plus.bind("<Button-1>", lambda e: self._new_session())
+        plus.bind("<Enter>", lambda e: plus.configure(fg=CYAN))
+        plus.bind("<Leave>", lambda e: plus.configure(fg=TEXT_MUTED))
+
+    def _switch_session(self, idx: int):
+        if idx == self._active_session:
+            return
+        # Save scroll position of current session
+        self._sessions[self._active_session]._scroll_pos = self._canvas.yview()[0]
+
+        self._active_session = idx
+
+        # Rebuild message area
+        for w in self._msg_frame.winfo_children():
+            w.destroy()
+        self._current_bubble = None
+        self._empty_label = None
+
+        if not self.conversation:
+            self._empty_label = tk.Label(self._msg_frame, text="", bg=BG_BASE)
+            self._empty_label.pack(expand=True, pady=4)
+        else:
+            self._display_loaded_chat()
+
+        # Restore scroll position
+        pos = getattr(self._sessions[idx], "_scroll_pos", 1.0)
+        self.after(50, lambda: self._canvas.yview_moveto(pos))
+
+        self._refresh_tab_bar()
+
+    def _new_session(self):
+        n = len(self._sessions) + 1
+        self._sessions.append(ChatSession(f"Chat {n}"))
+        self._switch_session(len(self._sessions) - 1)
+
+    def _close_session(self, idx: int):
+        if len(self._sessions) == 1:
+            self._clear_chat()
+            return
+        sess = self._sessions.pop(idx)
+        if sess.conversation:
+            try:
+                save_chat_to_file(sess.conversation)
+            except Exception:
+                pass
+        new_idx = min(idx, len(self._sessions) - 1)
+        # Force _switch_session to rebuild by setting _active_session to a sentinel
+        self._active_session = -1
+        self._switch_session(new_idx)
 
     def _toggle_search(self):
         self._search_visible = not self._search_visible
@@ -2357,6 +2468,11 @@ class ChatWindow(tk.Tk):
         b.append(text)
         self._scroll_bottom()
         self.conversation.append({"role": "user", "content": text})
+        # Auto-name tab from first user message
+        if len(self.conversation) == 1:
+            short = text[:20].strip()
+            self._sessions[self._active_session].name = short
+            self._refresh_tab_bar()
         self._run_claude()
 
     def send_screenshot(self, img: Image.Image, prompt: str):
