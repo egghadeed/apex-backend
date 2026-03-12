@@ -29,7 +29,6 @@ def create_user(email: str, hashed_password: str) -> dict:
         "email":           email,
         "hashed_password": hashed_password,
         "tier":            "free",
-        "message_count":   0,
         "active":          True,
     }).execute()
     return res.data[0]
