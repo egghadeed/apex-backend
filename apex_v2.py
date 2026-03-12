@@ -682,7 +682,7 @@ class FloatingOverlay(tk.Toplevel):
             self._pin_lbl.configure(text="")
             self.attributes("-alpha", 0.97)
             # Reset timer on unpin so it doesn't instantly vanish
-            self._remaining = self.AUTO_CLOSE_MS
+            self._remaining = _overlay_duration_ms
 
     # ── Drag to move ──────────────────────────────────────────────────────────
 
@@ -800,13 +800,6 @@ class FloatingOverlay(tk.Toplevel):
             w = self._prog_canvas.winfo_width() or 520
             self._prog_canvas.coords(self._prog_rect, 0, 0, int(w * pct), 2)
         self.after(250, self._tick)
-
-    def _submit_followup(self):
-        text = self._followup_entry.get().strip()
-        if not text or text == "follow up...": return
-        self._dismiss()
-        if self._on_followup:
-            self._on_followup(text)
 
     def _dismiss(self):
         self._dismissed = True
@@ -988,14 +981,19 @@ class ScreenshotSelector(tk.Toplevel):
         y1 = int(min(self.start_y, e.y) * self._scale_y) + self._phys_top
         x2 = int(max(self.start_x, e.x) * self._scale_x) + self._phys_left
         y2 = int(max(self.start_y, e.y) * self._scale_y) + self._phys_top
+        master   = self.master
+        callback = self.callback
         self.destroy(); self.update()
-        time.sleep(0.15)
-        with mss.mss() as sct:
-            mon = {"left": x1, "top": y1, "width": x2-x1, "height": y2-y1} \
-                  if x2-x1 > 30 and y2-y1 > 30 else sct.monitors[0]
-            shot = sct.grab(mon)
-            img  = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-        self.callback(img)
+
+        def _take():
+            with mss.mss() as sct:
+                mon = {"left": x1, "top": y1, "width": x2-x1, "height": y2-y1} \
+                      if x2-x1 > 30 and y2-y1 > 30 else sct.monitors[0]
+                shot = sct.grab(mon)
+                img  = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+            master.after(0, lambda: callback(img))
+
+        threading.Timer(0.15, _take).start()
 
 
 # ── Prompt dialog ─────────────────────────────────────────────────────────────
@@ -1276,6 +1274,7 @@ class ChatWindow(tk.Tk):
 
         self._sessions:       list = [ChatSession("Chat 1")]
         self._active_session: int  = 0
+        self._session_counter: int = 1   # monotonic — avoids duplicate tab names
         self._overlay: FloatingOverlay | None = None
         self._current_bubble: MessageBubble | None = None
         self._images = []
@@ -1797,8 +1796,8 @@ class ChatWindow(tk.Tk):
         self._refresh_tab_bar()
 
     def _new_session(self):
-        n = len(self._sessions) + 1
-        self._sessions.append(ChatSession(f"Chat {n}"))
+        self._session_counter += 1
+        self._sessions.append(ChatSession(f"Chat {self._session_counter}"))
         self._switch_session(len(self._sessions) - 1)
 
     def _close_session(self, idx: int):
@@ -1950,9 +1949,10 @@ class ChatWindow(tk.Tk):
         inner = tk.Frame(card, bg=BG_SURFACE, padx=14, pady=10)
         inner.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
+        cached_messages = load_chat_from_file(filepath)
+
         def load_this(_=None):
-            messages = load_chat_from_file(filepath)
-            if messages:
+            if cached_messages:
                 # Clear current chat first (save it if needed)
                 if self.conversation:
                     self._save_current_chat()
@@ -1962,7 +1962,7 @@ class ChatWindow(tk.Tk):
                 self._empty_label = None
                 self._current_bubble = None
                 # Load the selected conversation
-                self.conversation = messages
+                self.conversation = list(cached_messages)
                 self._display_loaded_chat()
                 self._switch_page("chat")
 
@@ -1979,8 +1979,7 @@ class ChatWindow(tk.Tk):
         title_lbl.pack(anchor=tk.W)
         title_lbl.bind("<Button-1>", load_this)
 
-        messages = load_chat_from_file(filepath)
-        msg_count = len([m for m in messages if m["role"] == "user"])
+        msg_count = len([m for m in cached_messages if m["role"] == "user"])
         tk.Label(inner, text=f"{msg_count} exchanges",
                  font=(FONT_MONO, 7), fg=TEXT_MUTED, bg=BG_SURFACE).pack(anchor=tk.W)
 
@@ -2008,8 +2007,6 @@ class ChatWindow(tk.Tk):
             text = msg.get("content", "")
             b.append(text if isinstance(text, str) else str(text))
         self._scroll_bottom()
-        # Re-bind scroll on everything after full render
-        self.after(100, lambda: self._bind_mousewheel(self._msg_frame))
 
     def _build_chat_bottom(self, container):
         tk.Frame(container, bg=BORDER, height=1).pack(fill=tk.X)
@@ -2211,9 +2208,10 @@ class ChatWindow(tk.Tk):
             except Exception:
                 pass
             clear_auth()
-            self.destroy()
-            login = LoginScreen(on_complete=lambda: ChatWindow().mainloop())
-            login.mainloop()
+            def _restart():
+                self.destroy()
+                LoginScreen(on_complete=lambda: ChatWindow().mainloop()).mainloop()
+            self.after(0, _restart)
 
         so_btn.bind("<Button-1>", do_signout)
         so_btn.bind("<Enter>",    lambda e: (so_btn.configure(bg=RED, fg=BG_BASE),
@@ -2332,7 +2330,8 @@ class ChatWindow(tk.Tk):
             n = delete_all_screenshots()
             self._ss_status.configure(
                 text=f"deleted {n} screenshot{'s' if n != 1 else ''}.", fg=RED)
-            self.after(3000, lambda: self._ss_status.configure(text=""))
+            self.after(3000, lambda: self._ss_status.configure(text="")
+                       if self._ss_status.winfo_exists() else None)
 
         del_btn.bind("<Button-1>", do_delete_screenshots)
         del_btn.bind("<Enter>",
@@ -2646,7 +2645,10 @@ class ChatWindow(tk.Tk):
         if self._current_bubble:
             self._current_bubble.append("\n[cancelled]")
             self._current_bubble = None
-        self._set_generating(False)
+        # Do NOT call _set_generating(False) here — the worker thread's
+        # _Cancelled handler puts ("done", None) on msg_queue which resets
+        # state via _process_queue. Calling it here causes a race where the
+        # input re-enables before the thread has actually stopped.
 
     def _clear_chat(self):
         if self.conversation:
@@ -2710,6 +2712,8 @@ class ChatWindow(tk.Tk):
         ss_thumb = img.copy(); ss_thumb.thumbnail((100, 70))
         card_photo = ImageTk.PhotoImage(ss_thumb)
         self._images.append(card_photo)
+        if len(self._images) > 50:       # cap to avoid unbounded memory growth
+            self._images = self._images[-50:]
         self._add_screenshot_card(card_photo, prompt, ts)
 
         # 3. Add user bubble to chat showing the prompt
@@ -2804,7 +2808,7 @@ class ChatWindow(tk.Tk):
                         msg_queue.put(("overlay_clear", None))
                         first[0] = False
                     msg_queue.put(("chunk", chunk))
-                full = ask_claude(self.conversation, on_chunk=on_chunk,
+                full = ask_claude(self.conversation[:], on_chunk=on_chunk,
                                   cancel_event=cancel)
                 self.conversation.append({"role": "assistant", "content": full})
                 msg_queue.put(("done", None))
@@ -2860,9 +2864,10 @@ class ChatWindow(tk.Tk):
                     self._set_generating(False)
                     if "Session expired" in msg:
                         clear_auth()
-                        self.destroy()
-                        login = LoginScreen(on_complete=lambda: ChatWindow().mainloop())
-                        login.mainloop()
+                        def _restart():
+                            self.destroy()
+                            LoginScreen(on_complete=lambda: ChatWindow().mainloop()).mainloop()
+                        self.after(0, _restart)
                         return
                     self._add_system_note(f"error: {msg}")
                     if self._overlay and not self._overlay._dismissed:
@@ -2978,46 +2983,49 @@ class ChatWindow(tk.Tk):
             try: self._overlay._dismiss()
             except: pass
         self.iconify(); self.update()
-        time.sleep(0.2)
 
-        def got_image(img):
-            def on_submit(i, p):
-                msg_queue.put(("screenshot", (i, p)))
-                # do NOT restore the main console — answer goes to overlay only
-            dlg = PromptDialog(self, img, on_submit)
-            dlg.protocol = lambda *a: None
-            dlg.after(80, lambda: (
-                dlg.lift(),
-                dlg.attributes("-topmost", True),
-                dlg.entry.focus_force()
-            ))
-        ScreenshotSelector(self, got_image)
+        def _open_selector():
+            def got_image(img):
+                def on_submit(i, p):
+                    msg_queue.put(("screenshot", (i, p)))
+                dlg = PromptDialog(self, img, on_submit)
+                dlg.protocol = lambda *a: None
+                dlg.after(80, lambda: (
+                    dlg.lift(),
+                    dlg.attributes("-topmost", True),
+                    dlg.entry.focus_force()
+                ))
+            ScreenshotSelector(self, got_image)
+
+        self.after(200, _open_selector)
 
     def _trigger_highlight(self):
-        from pynput.keyboard import Controller, Key
-        import platform
-        kb = Controller()
-        old_clip = ""
-        try:    old_clip = pyperclip.paste()
-        except: pass
-        for k in (Key.ctrl_l, Key.ctrl_r, Key.shift, Key.shift_r):
-            try: kb.release(k)
+        def _work():
+            from pynput.keyboard import Controller, Key
+            import platform
+            kb = Controller()
+            old_clip = ""
+            try:    old_clip = pyperclip.paste()
             except: pass
-        time.sleep(0.15)
-        if platform.system() == "Darwin":
-            with kb.pressed(Key.cmd):
-                kb.press('c'); kb.release('c')
-        else:
-            with kb.pressed(Key.ctrl_l):
-                kb.press('c'); kb.release('c')
-        time.sleep(0.4)
-        try:    new_clip = pyperclip.paste()
-        except: new_clip = ""
-        if new_clip and new_clip.strip() and new_clip != old_clip:
-            msg_queue.put(("highlight", new_clip))
-        else:
-            self.after(100, lambda: self._open_mini_chat(
-                note="no text detected — highlight first, then Ctrl+Shift+H"))
+            for k in (Key.ctrl_l, Key.ctrl_r, Key.shift, Key.shift_r):
+                try: kb.release(k)
+                except: pass
+            time.sleep(0.15)
+            if platform.system() == "Darwin":
+                with kb.pressed(Key.cmd):
+                    kb.press('c'); kb.release('c')
+            else:
+                with kb.pressed(Key.ctrl_l):
+                    kb.press('c'); kb.release('c')
+            time.sleep(0.4)
+            try:    new_clip = pyperclip.paste()
+            except: new_clip = ""
+            if new_clip and new_clip.strip() and new_clip != old_clip:
+                msg_queue.put(("highlight", new_clip))
+            else:
+                self.after(0, lambda: self._open_mini_chat(
+                    note="no text detected — highlight first, then Ctrl+Shift+H"))
+        threading.Thread(target=_work, daemon=True).start()
 
 
 
