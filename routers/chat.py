@@ -93,38 +93,68 @@ def _convert_messages_for_openai(messages: list[dict], model: str, system: str =
     return converted
 
 
+def _strip_images(messages: list[dict]) -> list[dict]:
+    """Remove image blocks from messages, replacing them with a text placeholder."""
+    stripped = []
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if block.get("type") in ("image", "image_url"):
+                    parts.append({"type": "text", "text": "[image not supported by this model]"})
+                else:
+                    parts.append(block)
+            stripped.append({**msg, "content": parts})
+        else:
+            stripped.append(msg)
+    return stripped
+
+
 def _stream_openai(model: str, messages: list[dict], system: str = None):
     """Yield SSE chunks from OpenAI streaming API."""
     from openai import OpenAI
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    oai_messages = _convert_messages_for_openai(messages, model, system=system)
-
-    kwargs: dict = {
-        "model":    model,
-        "messages": oai_messages,
-        "stream":   True,
-    }
-    if model in O1_MODELS:
-        kwargs["max_completion_tokens"] = 2048
-    else:
-        kwargs["max_tokens"] = 2048
-        kwargs["messages"]   = [{"role": "system", "content": system or SYSTEM_PROMPT}] + oai_messages
+    def _build_kwargs(msgs):
+        oai_messages = _convert_messages_for_openai(msgs, model, system=system)
+        kwargs: dict = {"model": model, "messages": oai_messages, "stream": True}
+        if model in O1_MODELS:
+            kwargs["max_completion_tokens"] = 2048
+        else:
+            kwargs["max_tokens"] = 2048
+            kwargs["messages"]   = [{"role": "system", "content": system or SYSTEM_PROMPT}] + oai_messages
+        return kwargs
 
     input_tokens = output_tokens = 0
 
     try:
-        stream = client.chat.completions.create(**kwargs)
+        stream = client.chat.completions.create(**_build_kwargs(messages))
         for chunk in stream:
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta and delta.content:
                 yield f"data: {json.dumps({'type': 'chunk', 'text': delta.content})}\n\n"
-            # Capture usage from last chunk
             if hasattr(chunk, "usage") and chunk.usage:
                 input_tokens  = chunk.usage.prompt_tokens or 0
                 output_tokens = chunk.usage.completion_tokens or 0
         yield f"data: {json.dumps({'type': 'done', 'input_tokens': input_tokens, 'output_tokens': output_tokens})}\n\n"
     except Exception as e:
+        # If the model rejected image content, retry without images
+        if "image_url" in str(e) or "image" in str(e).lower() and "400" in str(e):
+            try:
+                stream = client.chat.completions.create(**_build_kwargs(_strip_images(messages)))
+                for chunk in stream:
+                    delta = chunk.choices[0].delta if chunk.choices else None
+                    if delta and delta.content:
+                        yield f"data: {json.dumps({'type': 'chunk', 'text': delta.content})}\n\n"
+                    if hasattr(chunk, "usage") and chunk.usage:
+                        input_tokens  = chunk.usage.prompt_tokens or 0
+                        output_tokens = chunk.usage.completion_tokens or 0
+                yield f"data: {json.dumps({'type': 'done', 'input_tokens': input_tokens, 'output_tokens': output_tokens})}\n\n"
+                return
+            except Exception as e2:
+                yield f"data: {json.dumps({'type': 'error', 'message': str(e2)})}\n\n"
+                return
         yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
 
