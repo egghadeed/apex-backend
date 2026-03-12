@@ -1,0 +1,45 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'   # triggers on v1.0, v1.2.3, etc.
+
+permissions:
+  contents: write   # needed to create GitHub Releases
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller
+          pip install anthropic pillow pynput pyperclip mss matplotlib openai
+
+      - name: Build exe
+        run: >
+          pyinstaller --onefile --windowed
+          --icon=apex_icon.ico
+          --name="Apex Assistant"
+          --hidden-import=pynput.keyboard._win32
+          --hidden-import=pynput.mouse._win32
+          --hidden-import=PIL._tkinter_finder
+          --hidden-import=matplotlib.backends.backend_agg
+          apex_v2.py
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Apex Assistant ${{ github.ref_name }}
+          files: dist/Apex Assistant.exe
+          generate_release_notes: true

@@ -40,6 +40,16 @@ from pynput import keyboard
 from PIL import Image, ImageTk
 import mss
 
+# matplotlib — optional, used for LaTeX math rendering
+try:
+    import matplotlib as _mpl
+    _mpl.use("Agg")
+    from matplotlib.figure import Figure as _MplFigure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg as _FigureCanvasAgg
+    _MATPLOTLIB_OK = True
+except Exception:
+    _MATPLOTLIB_OK = False
+
 # ── Config ────────────────────────────────────────────────────────────────────
 SYSTEM = (
     "You are Apex, a helpful desktop AI assistant. "
@@ -60,12 +70,87 @@ msg_queue: queue.Queue = queue.Queue()
 CHAT_HISTORY_DIR = os.path.join(os.path.expanduser("~"), ".apex_chats")
 SCREENSHOTS_DIR  = os.path.join(os.path.expanduser("~"), ".apex_screenshots")
 AUTH_FILE        = os.path.join(os.path.expanduser("~"), ".apex_auth")
+SETTINGS_FILE    = os.path.join(os.path.expanduser("~"), ".apex_settings")
+
+# ── User-configurable settings ────────────────────────────────────────────────
+_overlay_duration_ms: int = 5000   # popup auto-close duration (ms)
+_custom_system_prompt: str = ""  # empty = use backend default
+_hotkeys: dict = {
+    "screenshot": "s",
+    "highlight":  "h",
+    "chat":       "a",
+    "quit":       "q",
+    "voice":      "v",
+}
+_overlay_followup: bool = True
+_autostart: bool = True
+
+# ── Windows auto-start (registry) ─────────────────────────────────────────────
+_AUTOSTART_REG_KEY  = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_AUTOSTART_REG_NAME = "Apex Assistant"
+
+def _get_exe_path() -> str:
+    if getattr(sys, "frozen", False):
+        return sys.executable
+    return os.path.abspath(sys.argv[0])
+
+def _apply_autostart(enabled: bool):
+    """Write or remove the Run registry entry for auto-start on login."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _AUTOSTART_REG_KEY,
+                            0, winreg.KEY_SET_VALUE) as key:
+            if enabled:
+                winreg.SetValueEx(key, _AUTOSTART_REG_NAME, 0,
+                                  winreg.REG_SZ, f'"{_get_exe_path()}"')
+            else:
+                try:
+                    winreg.DeleteValue(key, _AUTOSTART_REG_NAME)
+                except FileNotFoundError:
+                    pass
+    except Exception:
+        pass
+
+def load_settings():
+    global _overlay_duration_ms, _custom_system_prompt, _overlay_followup, _autostart
+    first_run = not os.path.exists(SETTINGS_FILE)
+    try:
+        if not first_run:
+            with open(SETTINGS_FILE) as f:
+                data = json.load(f)
+            _overlay_duration_ms = max(1000, min(30000,
+                int(data.get("overlay_duration_ms", 5000))))
+            _custom_system_prompt = str(data.get("custom_system_prompt", ""))
+            loaded_hk = data.get("hotkeys", {})
+            for k in _hotkeys:
+                if k in loaded_hk and len(str(loaded_hk[k])) == 1:
+                    _hotkeys[k] = str(loaded_hk[k]).lower()
+            _overlay_followup = bool(data.get("overlay_followup", True))
+            _autostart = bool(data.get("autostart", True))
+    except Exception:
+        pass
+    # On first run, write the registry entry so autostart is on by default
+    if first_run:
+        _apply_autostart(True)
+
+def save_settings():
+    global _autostart
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump({"overlay_duration_ms": _overlay_duration_ms,
+                       "custom_system_prompt": _custom_system_prompt,
+                       "hotkeys": _hotkeys,
+                       "overlay_followup": _overlay_followup,
+                       "autostart": _autostart}, f)
+        _apply_autostart(_autostart)
+    except Exception:
+        pass
 
 # ── Backend URL — change to your deployed URL in production ──────────────────
 BACKEND_URL   = os.getenv("APEX_BACKEND_URL", "https://apex-assistant-api.onrender.com")
 if not BACKEND_URL.startswith("https://"):
     raise SystemExit(f"APEX_BACKEND_URL must use https://. Got: {BACKEND_URL}")
-VERSION       = "1.0.0"   # bump this before each release
+VERSION       = "1.1"   # bump this before each release
 DASHBOARD_URL = "https://apex-assistant.vercel.app/dashboard"
 
 # ── Update check ──────────────────────────────────────────────────────────────
@@ -111,6 +196,18 @@ def _show_update_dialog_if_pending(window: tk.Tk):
             webbrowser.open(DASHBOARD_URL)
 
 # ── Model metadata (mirrors backend config) ───────────────────────────────────
+# Fallback model lists per tier — used when available_models isn't populated yet
+TIER_MODELS_CLIENT = {
+    "free":  [("gpt-4o-mini", True), ("gpt-4o", True)],
+    "basic": [("gpt-4o-mini", True), ("gpt-4o", True)],
+    "pro":   [("gpt-4o-mini", True), ("gpt-4o", True), ("gpt-4-turbo", True),
+              ("o1-mini", False), ("claude-haiku-4-5-20251001", True)],
+    "power": [("gpt-4o-mini", True), ("gpt-4o", True), ("gpt-4-turbo", True),
+              ("o1-mini", False), ("claude-haiku-4-5-20251001", True),
+              ("o1", True), ("o3-mini", False),
+              ("claude-sonnet-4-20250514", True), ("claude-opus-4-20250514", True)],
+}
+
 MODEL_DISPLAY = {
     "gpt-4o-mini":               "GPT-4o mini",
     "gpt-4o":                    "GPT-4o",
@@ -353,7 +450,66 @@ def pil_to_b64(img: Image.Image) -> str:
     img.save(buf, format="PNG")
     return base64.standard_b64encode(buf.getvalue()).decode()
 
-def ask_claude(messages: list, on_chunk=None) -> str:
+
+def _record_wav(seconds: float = 5.0, samplerate: int = 16000) -> bytes:
+    """Record from mic and return raw WAV bytes."""
+    import sounddevice as sd
+    import numpy as np
+    import wave
+    import io
+    frames = sd.rec(int(seconds * samplerate), samplerate=samplerate,
+                    channels=1, dtype="int16")
+    sd.wait()
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(samplerate)
+        wf.writeframes(frames.tobytes())
+    return buf.getvalue()
+
+
+def _transcribe_wav(wav_bytes: bytes) -> str:
+    """POST wav bytes to backend /chat/transcribe, return transcribed text."""
+    global _access_token
+    boundary = "ApexAudioBoundary42"
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
+        f"Content-Type: audio/wav\r\n\r\n"
+    ).encode() + wav_bytes + f"\r\n--{boundary}--\r\n".encode()
+
+    def _build_req(token: str) -> urllib.request.Request:
+        r = urllib.request.Request(
+            f"{BACKEND_URL}/chat/transcribe", data=body, method="POST"
+        )
+        r.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+        r.add_header("Authorization", f"Bearer {token}")
+        return r
+
+    tried_refresh = False
+    while True:
+        req = _build_req(_access_token)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read()).get("text", "")
+        except urllib.error.HTTPError as e:
+            if e.code == 401 and not tried_refresh:
+                tried_refresh = True
+                if refresh_access_token():
+                    continue  # retry with new token
+                else:
+                    raise RuntimeError("Session expired — please log in again")
+            raise
+
+
+class _Cancelled(Exception):
+    """Raised inside on_chunk to abort an in-progress stream."""
+    pass
+
+
+def ask_claude(messages: list, on_chunk=None,
+               cancel_event: threading.Event = None) -> str:
     """Stream chat via Apex backend. Handles token refresh automatically."""
     global _access_token
 
@@ -361,6 +517,8 @@ def ask_claude(messages: list, on_chunk=None) -> str:
     payload  = {"messages": messages}
     if _preferred_model:
         payload["model"] = _preferred_model
+    if _custom_system_prompt:
+        payload["system"] = _custom_system_prompt
     body = json.dumps(payload).encode()
 
     def do_request(token: str) -> urllib.request.Request:
@@ -378,7 +536,9 @@ def ask_claude(messages: list, on_chunk=None) -> str:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 buffer = ""
                 while True:
-                    chunk = resp.read(64)
+                    if cancel_event and cancel_event.is_set():
+                        raise _Cancelled()
+                    chunk = resp.read(1024)
                     if not chunk:
                         break
                     buffer += chunk.decode("utf-8", errors="replace")
@@ -401,6 +561,9 @@ def ask_claude(messages: list, on_chunk=None) -> str:
                             raise RuntimeError(event.get("message", "Unknown error"))
             return full
 
+        except _Cancelled:
+            raise  # propagate cancellation up to the worker thread
+
         except urllib.error.HTTPError as e:
             if e.code == 401 and not tried_refresh:
                 tried_refresh = True
@@ -417,15 +580,17 @@ def ask_claude(messages: list, on_chunk=None) -> str:
 # ── Floating Overlay — HUD tooltip style ──────────────────────────────────────
 
 class FloatingOverlay(tk.Toplevel):
-    AUTO_CLOSE_MS = 8000
+    AUTO_CLOSE_MS = 8000  # fallback default
 
-    def __init__(self, master):
+    def __init__(self, master, on_followup=None):
         super().__init__(master)
         self._dismissed  = False
         self._pinned     = False   # click to pin — pauses timer, hides countdown
-        self._remaining  = self.AUTO_CLOSE_MS
+        self._remaining  = _overlay_duration_ms
         self._drag_x     = 0
         self._drag_y     = 0
+        self._on_followup = on_followup
+        self._math_images: list = []
 
         self.overrideredirect(True)
         self.attributes("-topmost", True)
@@ -433,10 +598,15 @@ class FloatingOverlay(tk.Toplevel):
         self.configure(bg=BG_BASE)
 
         sw = self.winfo_screenwidth()
-        self.geometry(f"520x60+{sw - 540}+20")
+        self.geometry(f"520x300+{sw - 560}+20")
 
         # Cyan top border line
         tk.Frame(self, bg=CYAN, height=1).pack(fill=tk.X)
+
+        # Progress bar strip — shrinks as countdown ticks
+        self._prog_canvas = tk.Canvas(self, bg=BG_BASE, height=2, highlightthickness=0)
+        self._prog_canvas.pack(fill=tk.X)
+        self._prog_rect = self._prog_canvas.create_rectangle(0, 0, 10000, 2, fill=CYAN, outline="")
 
         self._body = tk.Frame(self, bg=BG_BASE)
         self._body.pack(fill=tk.BOTH, expand=True)
@@ -452,12 +622,6 @@ class FloatingOverlay(tk.Toplevel):
 
         tk.Label(topbar, text="APEX", font=(FONT_MONO, 8, "bold"),
                  fg=CYAN, bg=BG_BASE).pack(side=tk.LEFT)
-
-        # Timer label — hidden while pinned
-        self._timer_lbl = tk.Label(topbar, text="[8s]",
-                                   font=(FONT_MONO, 7),
-                                   fg=TEXT_MUTED, bg=BG_BASE)
-        self._timer_lbl.pack(side=tk.LEFT, padx=8)
 
         close = tk.Label(topbar, text="×", font=(FONT_MONO, 10),
                          fg=TEXT_MUTED, bg=BG_BASE, cursor="hand2")
@@ -487,42 +651,53 @@ class FloatingOverlay(tk.Toplevel):
         )
         self._text.pack(fill=tk.BOTH, expand=True)
 
-        # Click anywhere on overlay (except × button) to toggle pin
-        drag_targets = [self, self._body, topbar, dot_c, txt_frame, self._text,
-                        self._timer_lbl, self._pin_lbl]
-        for w in drag_targets:
-            w.bind("<Button-1>",        self._on_click,      add="+")
-            w.bind("<ButtonPress-1>",   self._drag_start,    add="+")
-            w.bind("<B1-Motion>",       self._drag_motion,   add="+")
+        # Bind drag/pin events to every widget in the overlay tree
+        self._bind_overlay_events(self)
 
         self._tick()
+
+    # ── Event binding ─────────────────────────────────────────────────────────
+
+    def _bind_overlay_events(self, widget):
+        """Recursively bind drag/click events to every widget in the overlay."""
+        widget.bind("<ButtonPress-1>",   self._drag_start, add="+")
+        widget.bind("<B1-Motion>",       self._drag_motion, add="+")
+        widget.bind("<ButtonRelease-1>", self._on_click,   add="+")
+        for child in widget.winfo_children():
+            self._bind_overlay_events(child)
 
     # ── Pin / unpin on click ──────────────────────────────────────────────────
 
     def _on_click(self, event):
         # Only toggle pin on a clean click (not drag)
-        if getattr(self, "_dragging", False):
+        was_dragging = getattr(self, "_dragging", False)
+        self._dragging = False   # reset for next interaction
+        if was_dragging:
             return
         self._pinned = not self._pinned
         if self._pinned:
-            self._timer_lbl.configure(text="")
             self._pin_lbl.configure(text="[pinned]")
             self.attributes("-alpha", 1.0)
         else:
             self._pin_lbl.configure(text="")
             self.attributes("-alpha", 0.97)
             # Reset timer on unpin so it doesn't instantly vanish
-            self._remaining = self.AUTO_CLOSE_MS
+            self._remaining = _overlay_duration_ms
 
     # ── Drag to move ──────────────────────────────────────────────────────────
 
     def _drag_start(self, event):
-        self._drag_x  = event.x_root - self.winfo_x()
-        self._drag_y  = event.y_root - self.winfo_y()
+        self._drag_x   = event.x_root - self.winfo_x()
+        self._drag_y   = event.y_root - self.winfo_y()
+        self._press_x  = event.x_root
+        self._press_y  = event.y_root
         self._dragging = False
 
     def _drag_motion(self, event):
-        self._dragging = True
+        dx = abs(event.x_root - getattr(self, "_press_x", event.x_root))
+        dy = abs(event.y_root - getattr(self, "_press_y", event.y_root))
+        if dx > 5 or dy > 5:
+            self._dragging = True
         x = event.x_root - self._drag_x
         y = event.y_root - self._drag_y
         # Keep within screen bounds
@@ -548,6 +723,52 @@ class FloatingOverlay(tk.Toplevel):
         self._text.delete("1.0", tk.END)
         self._text.configure(state=tk.DISABLED)
 
+    def render_math(self):
+        """Render LaTeX math spans as images (same logic as MessageBubble)."""
+        if self._dismissed or not _MATPLOTLIB_OK:
+            return
+        import re
+        content = self._text.get("1.0", tk.END)
+        pattern = re.compile(
+            r'\$\$([\s\S]+?)\$\$'
+            r'|\\\[([\s\S]+?)\\\]'
+            r'|\$([^\$\n]+?)\$'
+            r'|\\\(([^\n]+?)\\\)'
+        )
+        segments, last = [], 0
+        for m in pattern.finditer(content):
+            if m.start() > last:
+                segments.append(("text", content[last:m.start()]))
+            if m.group(1) is not None:
+                segments.append(("display", m.group(1).strip()))
+            elif m.group(2) is not None:
+                segments.append(("display", m.group(2).strip()))
+            elif m.group(3) is not None:
+                segments.append(("inline", m.group(3).strip()))
+            else:
+                segments.append(("inline", m.group(4).strip()))
+            last = m.end()
+        if last < len(content):
+            segments.append(("text", content[last:]))
+        if not any(k in ("display", "inline") for k, _ in segments):
+            return
+        self._text.configure(state=tk.NORMAL)
+        self._text.delete("1.0", tk.END)
+        for kind, val in segments:
+            if kind == "text":
+                self._text.insert(tk.END, val)
+            else:
+                img = _render_math_image(val, display=(kind == "display"), bg=BG_BASE)
+                if img:
+                    self._math_images.append(img)
+                    self._text.image_create(tk.END, image=img)
+                    if kind == "display":
+                        self._text.insert(tk.END, "\n")
+                else:
+                    self._text.insert(tk.END, val)
+        self._text.configure(state=tk.DISABLED)
+        self._resize()
+
     def _resize(self):
         content = self._text.get("1.0", tk.END)
         sw = self.winfo_screenwidth()
@@ -564,7 +785,7 @@ class FloatingOverlay(tk.Toplevel):
         lines = max(lines, content.count('\n') + 1)
         txt_h = min(max(lines, 1), 24)
         self._text.configure(height=txt_h)
-        total_h = min(txt_h * 18 + 60, int(sh * 0.65))
+        total_h = min(max(txt_h * 18 + 80, 260), int(sh * 0.65))
         self.geometry(f"520x{total_h}+{cur_x}+{cur_y}")
 
     # ── Timer tick ────────────────────────────────────────────────────────────
@@ -573,10 +794,11 @@ class FloatingOverlay(tk.Toplevel):
         if self._dismissed: return
         if not self._pinned:
             self._remaining -= 250
-            secs = max(0, self._remaining // 1000)
-            self._timer_lbl.configure(text=f"[{secs}s]")
             if self._remaining <= 0:
                 self._dismiss(); return
+            pct = max(0.0, self._remaining / _overlay_duration_ms)
+            w = self._prog_canvas.winfo_width() or 520
+            self._prog_canvas.coords(self._prog_rect, 0, 0, int(w * pct), 2)
         self.after(250, self._tick)
 
     def _dismiss(self):
@@ -759,14 +981,19 @@ class ScreenshotSelector(tk.Toplevel):
         y1 = int(min(self.start_y, e.y) * self._scale_y) + self._phys_top
         x2 = int(max(self.start_x, e.x) * self._scale_x) + self._phys_left
         y2 = int(max(self.start_y, e.y) * self._scale_y) + self._phys_top
+        master   = self.master
+        callback = self.callback
         self.destroy(); self.update()
-        time.sleep(0.15)
-        with mss.mss() as sct:
-            mon = {"left": x1, "top": y1, "width": x2-x1, "height": y2-y1} \
-                  if x2-x1 > 30 and y2-y1 > 30 else sct.monitors[0]
-            shot = sct.grab(mon)
-            img  = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-        self.callback(img)
+
+        def _take():
+            with mss.mss() as sct:
+                mon = {"left": x1, "top": y1, "width": x2-x1, "height": y2-y1} \
+                      if x2-x1 > 30 and y2-y1 > 30 else sct.monitors[0]
+                shot = sct.grab(mon)
+                img  = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+            master.after(0, lambda: callback(img))
+
+        threading.Timer(0.15, _take).start()
 
 
 # ── Prompt dialog ─────────────────────────────────────────────────────────────
@@ -861,6 +1088,44 @@ class PromptDialog(tk.Toplevel):
         self._on_submit(self._img, prompt)
 
 
+# ── LaTeX math rendering ──────────────────────────────────────────────────────
+
+def _render_math_image(expr: str, display: bool, bg: str) -> "ImageTk.PhotoImage | None":
+    """Render a LaTeX math expression to a PhotoImage using matplotlib mathtext."""
+    if not _MATPLOTLIB_OK:
+        return None
+    try:
+        latex = f"$\\displaystyle {expr}$" if display else f"${expr}$"
+
+        fig = _MplFigure(dpi=110)
+        _FigureCanvasAgg(fig)   # attach Agg canvas so fig.canvas.draw() works
+        fig.patch.set_facecolor(bg)
+        ax = fig.add_subplot(111)
+        ax.set_axis_off()
+        ax.patch.set_facecolor(bg)
+
+        t = ax.text(0, 0.5, latex, fontsize=9.5, color=TEXT_PRIMARY,
+                    va="center", ha="left", transform=ax.transAxes)
+
+        fig.canvas.draw()
+        bb = t.get_window_extent(renderer=fig.canvas.get_renderer())
+        w = max(bb.width  / fig.dpi + 0.15, 0.3)
+        h = max(bb.height / fig.dpi + 0.10, 0.2)
+        fig.set_size_inches(w, h)
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=110, bbox_inches="tight",
+                    pad_inches=0.04, facecolor=bg, edgecolor="none")
+        buf.seek(0)
+        fig.clf()
+
+        return ImageTk.PhotoImage(Image.open(buf).convert("RGBA"))
+    except Exception as _e:
+        import sys as _sys
+        print(f"[LaTeX] render failed for {expr!r}: {_e}", file=_sys.stderr)
+        return None
+
+
 # ── Message Bubble — terminal log strip ───────────────────────────────────────
 
 class MessageBubble(tk.Frame):
@@ -902,19 +1167,84 @@ class MessageBubble(tk.Frame):
             cursor="arrow",
         )
         self._text.pack(fill=tk.X)
+        self._text.bind("<Configure>", self._fit_height)
+        self._bg = bg
+        self._math_images: list = []  # keep PhotoImage refs alive
+
+    def _fit_height(self, _=None):
+        self._text.update_idletasks()
+        n = self._text.count("1.0", tk.END, "displaylines")
+        h = max(n[0] if n else 1, 1)
+        if int(self._text.cget("height")) != h:
+            self._text.configure(height=h)
 
     def append(self, text: str, tag="body"):
         self._text.configure(state=tk.NORMAL)
         self._text.insert(tk.END, text)
-        lines = int(self._text.index(tk.END).split(".")[0])
-        self._text.configure(height=max(lines, 1), state=tk.DISABLED)
+        self._fit_height()
+        self._text.configure(state=tk.DISABLED)
 
     def set_image(self, photo):
         self._text.configure(state=tk.NORMAL)
         self._text.image_create(tk.END, image=photo)
         self._text.insert(tk.END, "\n")
-        lines = int(self._text.index(tk.END).split(".")[0]) + 6
-        self._text.configure(height=max(lines, 8), state=tk.DISABLED)
+        self._fit_height()
+        self._text.configure(state=tk.DISABLED)
+
+    def render_math(self):
+        """Replace $...$ and $$...$$ spans with rendered math images."""
+        import re
+        content = self._text.get("1.0", tk.END)
+
+        # Match $$...$$ (display) first, then $...$ (inline)
+        pattern = re.compile(
+            r'\$\$([\s\S]+?)\$\$'          # $$...$$  display
+            r'|\\\[([\s\S]+?)\\\]'          # \[...\]  display
+            r'|\$([^\$\n]+?)\$'            # $...$    inline
+            r'|\\\(([^\n]+?)\\\)'           # \(...\)  inline
+        )
+        segments = []
+        last = 0
+        for m in pattern.finditer(content):
+            if m.start() > last:
+                segments.append(("text", content[last:m.start()]))
+            if m.group(1) is not None:       # $$...$$
+                segments.append(("display", m.group(1).strip()))
+            elif m.group(2) is not None:     # \[...\]
+                segments.append(("display", m.group(2).strip()))
+            elif m.group(3) is not None:     # $...$
+                segments.append(("inline", m.group(3).strip()))
+            else:                            # \(...\)
+                segments.append(("inline", m.group(4).strip()))
+            last = m.end()
+        if last < len(content):
+            segments.append(("text", content[last:]))
+
+        if not any(k in ("display", "inline") for k, _ in segments):
+            return  # no math found
+
+        self._text.configure(state=tk.NORMAL)
+        self._text.delete("1.0", tk.END)
+        for kind, val in segments:
+            if kind == "text":
+                self._text.insert(tk.END, val)
+            else:
+                img = _render_math_image(val, display=(kind == "display"), bg=self._bg)
+                if img:
+                    self._math_images.append(img)
+                    self._text.image_create(tk.END, image=img)
+                    if kind == "display":
+                        self._text.insert(tk.END, "\n")
+                else:
+                    self._text.insert(tk.END, f"${'$' if kind=='display' else ''}{val}${'$' if kind=='display' else ''}")
+        self._text.configure(state=tk.DISABLED)
+        self._fit_height()
+
+
+class ChatSession:
+    def __init__(self, name: str = "Chat 1"):
+        self.name = name
+        self.conversation: list = []
 
 
 # ── Main Chat Window ──────────────────────────────────────────────────────────
@@ -942,10 +1272,16 @@ class ChatWindow(tk.Tk):
         self._drag_y = 0
         self._resizing = False
 
-        self.conversation: list = []
+        self._sessions:       list = [ChatSession("Chat 1")]
+        self._active_session: int  = 0
+        self._session_counter: int = 1   # monotonic — avoids duplicate tab names
         self._overlay: FloatingOverlay | None = None
         self._current_bubble: MessageBubble | None = None
         self._images = []
+        self._is_generating = False
+        self._cancel_event  = threading.Event()
+        self._mic_btn = None
+        self._recording = False
 
         self._screenshots: list = []
         self._active_page: str = ""
@@ -960,6 +1296,14 @@ class ChatWindow(tk.Tk):
         self._process_queue()
         self.after(3500, lambda: _show_update_dialog_if_pending(self))
         threading.Thread(target=self._fetch_profile, daemon=True).start()
+        threading.Thread(target=self._warmup, daemon=True).start()
+
+    def _warmup(self):
+        """Send a silent throwaway message on startup to wake the backend/model."""
+        try:
+            ask_claude([{"role": "user", "content": "hi"}])
+        except Exception:
+            pass
 
     def _fetch_profile(self):
         """Background thread: fetch full profile and update _user_info with available_models."""
@@ -972,8 +1316,18 @@ class ChatWindow(tk.Tk):
                 "available_models": profile.get("available_models", []),
             })
             save_auth(_access_token, _refresh_token, _user_info)
+            self.after(0, self._rebuild_settings_page)
         except Exception:
             pass
+
+    def _rebuild_settings_page(self):
+        """Tear down and rebuild the settings page so model list reflects fetched profile."""
+        frame = self._pages.get("settings")
+        if not frame:
+            return
+        for child in frame.winfo_children():
+            child.destroy()
+        self._build_settings_page(frame)
 
     def _set_taskbar_title_and_icon(self):
         """Set taskbar title and icon. Uses embedded PNG so no external file needed."""
@@ -1221,7 +1575,7 @@ class ChatWindow(tk.Tk):
         icon_lbl = tk.Label(btn_area, text=icon,
                             font=(FONT_MONO, 15),
                             fg=TEXT_MUTED, bg=BG_SIDEBAR,
-                            cursor="hand2")
+                            cursor="hand2", width=2, anchor="center")
         icon_lbl.pack(expand=True)
 
         widgets = (row, btn_area, icon_lbl)
@@ -1277,6 +1631,16 @@ class ChatWindow(tk.Tk):
             builder(frame)
             self._pages[name] = frame
 
+    # ── Session-aware conversation property ───────────────────────────────────
+
+    @property
+    def conversation(self) -> list:
+        return self._sessions[self._active_session].conversation
+
+    @conversation.setter
+    def conversation(self, val: list):
+        self._sessions[self._active_session].conversation = val
+
     # ── Chat page ─────────────────────────────────────────────────────────────
 
     def _build_chat_page(self, container):
@@ -1290,7 +1654,51 @@ class ChatWindow(tk.Tk):
                  font=(FONT_MONO, 8), fg=TEXT_MUTED,
                  bg=BG_BASE).pack(side=tk.LEFT, padx=10)
 
+        search_btn = tk.Label(hdr, text="⌕", font=(FONT_MONO, 10),
+                              fg=TEXT_MUTED, bg=BG_BASE, cursor="hand2", padx=6)
+        search_btn.pack(side=tk.RIGHT)
+        search_btn.bind("<Button-1>", lambda e: self._toggle_search())
+        search_btn.bind("<Enter>", lambda e: search_btn.configure(fg=CYAN))
+        search_btn.bind("<Leave>", lambda e: search_btn.configure(fg=TEXT_MUTED))
+
         tk.Frame(container, bg=BORDER, height=1).pack(fill=tk.X)
+
+        # Search bar (hidden by default)
+        self._search_frame = tk.Frame(container, bg=BG_SURFACE, padx=12, pady=6)
+        # NOT packed yet — toggled by button
+
+        search_input_frame = tk.Frame(self._search_frame, bg=BG_SURFACE2,
+                                       highlightthickness=1, highlightbackground=BORDER)
+        search_input_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self._search_var = tk.StringVar()
+        self._search_entry = tk.Entry(
+            search_input_frame, textvariable=self._search_var,
+            bg=BG_SURFACE2, fg=TEXT_PRIMARY, font=(FONT_MONO, 9),
+            relief=tk.FLAT, insertbackground=CYAN,
+        )
+        self._search_entry.pack(fill=tk.X, padx=8, pady=5)
+        self._search_entry.bind("<Return>",    lambda e: self._do_search())
+        self._search_entry.bind("<Escape>",    lambda e: self._clear_search())
+        self._search_entry.bind("<KeyRelease>", lambda e: self._do_search())
+
+        self._search_status = tk.Label(self._search_frame,
+            text="", font=(FONT_MONO, 7), fg=TEXT_MUTED,
+            bg=BG_SURFACE, padx=8)
+        self._search_status.pack(side=tk.LEFT)
+
+        close_s = tk.Label(self._search_frame, text="×", font=(FONT_MONO, 10),
+                           fg=TEXT_MUTED, bg=BG_SURFACE, cursor="hand2", padx=6)
+        close_s.pack(side=tk.RIGHT)
+        close_s.bind("<Button-1>", lambda e: self._clear_search())
+
+        self._search_visible = False
+
+        self._tab_bar = tk.Frame(container, bg=BG_SIDEBAR, height=30)
+        self._tab_bar.pack(fill=tk.X)
+        self._tab_bar.pack_propagate(False)
+        self._tab_widgets: list = []
+        self._refresh_tab_bar()
 
         chat_area = tk.Frame(container, bg=BG_BASE)
         chat_area.pack(fill=tk.BOTH, expand=True)
@@ -1318,6 +1726,164 @@ class ChatWindow(tk.Tk):
         self._empty_label.pack(expand=True, pady=4)
 
         self._build_chat_bottom(container)
+
+    def _refresh_tab_bar(self):
+        for w in self._tab_bar.winfo_children():
+            w.destroy()
+        self._tab_widgets.clear()
+
+        for i, session in enumerate(self._sessions):
+            is_active = (i == self._active_session)
+            btn_bg = CYAN_DIM if is_active else BG_SIDEBAR
+
+            btn_f = tk.Frame(self._tab_bar, bg=btn_bg)
+            btn_f.pack(side=tk.LEFT, fill=tk.Y, padx=(10, 0))
+
+            if is_active:
+                tk.Frame(btn_f, bg=CYAN, height=2).pack(fill=tk.X)
+
+            lbl = tk.Label(btn_f, text=session.name,
+                           font=(FONT_MONO, 7),
+                           fg=TEXT_PRIMARY if is_active else TEXT_MUTED,
+                           bg=btn_bg, cursor="hand2", pady=4)
+            lbl.pack(side=tk.LEFT)
+
+            close_t = tk.Label(btn_f, text="×", font=(FONT_MONO, 8),
+                               fg=TEXT_MUTED, bg=btn_bg, cursor="hand2", padx=2)
+            close_t.pack(side=tk.LEFT)
+
+            idx = i  # capture
+            btn_f.bind("<Button-1>", lambda e, n=idx: self._switch_session(n))
+            lbl.bind("<Button-1>",   lambda e, n=idx: self._switch_session(n))
+            close_t.bind("<Button-1>", lambda e, n=idx: self._close_session(n))
+            close_t.bind("<Enter>", lambda e, w=close_t: w.configure(fg="#ff4d4d"))
+            close_t.bind("<Leave>", lambda e, w=close_t, bg=btn_bg: w.configure(fg=TEXT_MUTED))
+
+            self._tab_widgets.append((btn_f, lbl))
+
+        # "+" new tab button
+        plus = tk.Label(self._tab_bar, text=" + ", font=(FONT_MONO, 8),
+                        fg=TEXT_MUTED, bg=BG_SIDEBAR, cursor="hand2")
+        plus.pack(side=tk.LEFT, fill=tk.Y, padx=4)
+        plus.bind("<Button-1>", lambda e: self._new_session())
+        plus.bind("<Enter>", lambda e: plus.configure(fg=CYAN))
+        plus.bind("<Leave>", lambda e: plus.configure(fg=TEXT_MUTED))
+
+    def _switch_session(self, idx: int):
+        if idx == self._active_session:
+            return
+        # Save scroll position of current session
+        self._sessions[self._active_session]._scroll_pos = self._canvas.yview()[0]
+
+        self._active_session = idx
+
+        # Rebuild message area
+        for w in self._msg_frame.winfo_children():
+            w.destroy()
+        self._current_bubble = None
+        self._empty_label = None
+
+        if not self.conversation:
+            self._empty_label = tk.Label(self._msg_frame, text="", bg=BG_BASE)
+            self._empty_label.pack(expand=True, pady=4)
+        else:
+            self._display_loaded_chat()
+
+        # Restore scroll position
+        pos = getattr(self._sessions[idx], "_scroll_pos", 1.0)
+        self.after(50, lambda: self._canvas.yview_moveto(pos))
+
+        self._refresh_tab_bar()
+
+    def _new_session(self):
+        self._session_counter += 1
+        self._sessions.append(ChatSession(f"Chat {self._session_counter}"))
+        self._switch_session(len(self._sessions) - 1)
+
+    def _close_session(self, idx: int):
+        if len(self._sessions) == 1:
+            self._clear_chat()
+            return
+        sess = self._sessions.pop(idx)
+        if sess.conversation:
+            try:
+                save_chat_to_file(sess.conversation)
+            except Exception:
+                pass
+        new_idx = min(idx, len(self._sessions) - 1)
+        self._active_session = new_idx
+        # Rebuild message area for the now-active session directly,
+        # avoiding _switch_session which would early-return (idx == _active_session)
+        # and previously used self._sessions[-1] via the -1 sentinel, corrupting scroll.
+        for w in self._msg_frame.winfo_children():
+            w.destroy()
+        self._current_bubble = None
+        self._empty_label = None
+        if not self.conversation:
+            self._empty_label = tk.Label(self._msg_frame, text="", bg=BG_BASE)
+            self._empty_label.pack(expand=True, pady=4)
+        else:
+            self._display_loaded_chat()
+        pos = getattr(self._sessions[new_idx], "_scroll_pos", 1.0)
+        self.after(50, lambda: self._canvas.yview_moveto(pos))
+        self._refresh_tab_bar()
+
+    def _toggle_search(self):
+        self._search_visible = not self._search_visible
+        if self._search_visible:
+            # Pack search bar right after the header separator
+            children = [w for w in self._search_frame.master.winfo_children()
+                        if w is not self._search_frame]
+            # Find the separator (height=1 frame) and insert after it
+            sep_idx = next(
+                (i for i, w in enumerate(children)
+                 if isinstance(w, tk.Frame) and w.cget("height") == 1),
+                0
+            )
+            if sep_idx + 1 < len(children):
+                self._search_frame.pack(fill=tk.X, before=children[sep_idx + 1])
+            else:
+                self._search_frame.pack(fill=tk.X)
+            self._search_entry.focus_set()
+        else:
+            self._clear_search()
+
+    def _do_search(self):
+        query = self._search_var.get().strip().lower()
+        if not query:
+            self._search_status.configure(text="")
+            return
+        children = [w for w in self._msg_frame.winfo_children()
+                    if isinstance(w, MessageBubble)]
+        match_widgets = []
+        for bubble in children:
+            # Extract text from the bubble's Text widget
+            try:
+                text = bubble._text.get("1.0", tk.END).lower()
+            except Exception:
+                text = ""
+            if query in text:
+                match_widgets.append(bubble)
+        n = len(match_widgets)
+        self._search_status.configure(
+            text=f"{n} match{'es' if n != 1 else ''}"
+        )
+        if match_widgets:
+            target = match_widgets[0]
+            self._canvas.update_idletasks()
+            frame_h = self._msg_frame.winfo_height()
+            target_y = target.winfo_y()
+            if frame_h > 0:
+                self._canvas.yview_moveto(target_y / frame_h)
+
+    def _clear_search(self):
+        self._search_visible = False
+        self._search_var.set("")
+        self._search_status.configure(text="")
+        try:
+            self._search_frame.pack_forget()
+        except Exception:
+            pass
 
     def _build_history_page(self, container):
         hdr = tk.Frame(container, bg=BG_BASE, padx=20, pady=14)
@@ -1383,9 +1949,10 @@ class ChatWindow(tk.Tk):
         inner = tk.Frame(card, bg=BG_SURFACE, padx=14, pady=10)
         inner.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
+        cached_messages = load_chat_from_file(filepath)
+
         def load_this(_=None):
-            messages = load_chat_from_file(filepath)
-            if messages:
+            if cached_messages:
                 # Clear current chat first (save it if needed)
                 if self.conversation:
                     self._save_current_chat()
@@ -1395,7 +1962,7 @@ class ChatWindow(tk.Tk):
                 self._empty_label = None
                 self._current_bubble = None
                 # Load the selected conversation
-                self.conversation = messages
+                self.conversation = list(cached_messages)
                 self._display_loaded_chat()
                 self._switch_page("chat")
 
@@ -1412,8 +1979,7 @@ class ChatWindow(tk.Tk):
         title_lbl.pack(anchor=tk.W)
         title_lbl.bind("<Button-1>", load_this)
 
-        messages = load_chat_from_file(filepath)
-        msg_count = len([m for m in messages if m["role"] == "user"])
+        msg_count = len([m for m in cached_messages if m["role"] == "user"])
         tk.Label(inner, text=f"{msg_count} exchanges",
                  font=(FONT_MONO, 7), fg=TEXT_MUTED, bg=BG_SURFACE).pack(anchor=tk.W)
 
@@ -1441,8 +2007,6 @@ class ChatWindow(tk.Tk):
             text = msg.get("content", "")
             b.append(text if isinstance(text, str) else str(text))
         self._scroll_bottom()
-        # Re-bind scroll on everything after full render
-        self.after(100, lambda: self._bind_mousewheel(self._msg_frame))
 
     def _build_chat_bottom(self, container):
         tk.Frame(container, bg=BORDER, height=1).pack(fill=tk.X)
@@ -1489,6 +2053,18 @@ class ChatWindow(tk.Tk):
         self._send_btn.bind("<Button-1>", lambda e: self._send_text())
         self._send_btn.bind("<Enter>", lambda e: self._send_btn.configure(fg=CYAN_HOVER))
         self._send_btn.bind("<Leave>", lambda e: self._send_btn.configure(fg=CYAN))
+
+        tk.Frame(input_frame, bg=BORDER, width=1).pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._mic_btn = tk.Label(
+            input_frame, text="🎤", font=(FONT_MONO, 11),
+            fg=TEXT_MUTED, bg=BG_SURFACE2, cursor="hand2", padx=6,
+        )
+        self._mic_btn.pack(side=tk.RIGHT, fill=tk.Y)
+        self._mic_btn.bind("<Button-1>", lambda e: self._trigger_voice())
+        self._mic_btn.bind("<Enter>", lambda e: self._mic_btn.configure(fg=CYAN))
+        self._mic_btn.bind("<Leave>", lambda e: self._mic_btn.configure(fg=TEXT_MUTED))
+        self._recording = False
 
         btn_row = tk.Frame(bottom, bg=BG_SIDEBAR)
         btn_row.pack(fill=tk.X, pady=(6, 0))
@@ -1578,10 +2154,20 @@ class ChatWindow(tk.Tk):
 
         body = tk.Frame(canvas, bg=BG_BASE, padx=28, pady=20)
         canvas.create_window((0, 0), window=body, anchor="nw")
-        body.bind("<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<MouseWheel>",
-            lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+
+        def _on_mousewheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+
+        def _bind_scroll(w):
+            w.bind("<MouseWheel>", _on_mousewheel)
+            for child in w.winfo_children():
+                _bind_scroll(child)
+
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        body.bind("<Configure>", lambda e: (
+            canvas.configure(scrollregion=canvas.bbox("all")),
+            _bind_scroll(body),
+        ))
 
         tk.Label(body, text="SETTINGS",
                  font=(FONT_MONO, 10, "bold"),
@@ -1622,9 +2208,10 @@ class ChatWindow(tk.Tk):
             except Exception:
                 pass
             clear_auth()
-            self.destroy()
-            login = LoginScreen(on_complete=lambda: ChatWindow().mainloop())
-            login.mainloop()
+            def _restart():
+                self.destroy()
+                LoginScreen(on_complete=lambda: ChatWindow().mainloop()).mainloop()
+            self.after(0, _restart)
 
         so_btn.bind("<Button-1>", do_signout)
         so_btn.bind("<Enter>",    lambda e: (so_btn.configure(bg=RED, fg=BG_BASE),
@@ -1632,15 +2219,41 @@ class ChatWindow(tk.Tk):
         so_btn.bind("<Leave>",    lambda e: (so_btn.configure(bg=BG_BASE, fg=TEXT_SECONDARY),
                                              so_outer.configure(bg=BORDER)))
 
+        # STARTUP section
+        tk.Frame(body, bg=BORDER, height=1).pack(fill=tk.X, pady=(0, 0))
+        section_label("STARTUP")
+
+        as_var = tk.BooleanVar(value=_autostart)
+
+        def _toggle_autostart():
+            global _autostart
+            _autostart = as_var.get()
+            save_settings()
+
+        as_row = tk.Frame(body, bg=BG_BASE)
+        as_row.pack(anchor=tk.W, pady=(0, 4))
+        tk.Checkbutton(
+            as_row, text="Launch on Windows login",
+            variable=as_var, command=_toggle_autostart,
+            font=(FONT_MONO, 9), fg=TEXT_PRIMARY, bg=BG_BASE,
+            activeforeground=TEXT_PRIMARY, activebackground=BG_BASE,
+            selectcolor=BG_SURFACE2,
+            relief=tk.FLAT, bd=0, highlightthickness=0,
+        ).pack(side=tk.LEFT)
+        tk.Frame(body, bg=BG_BASE, height=12).pack()
+
         # MODEL section
         tk.Frame(body, bg=BORDER, height=1).pack(fill=tk.X, pady=(0, 0))
         section_label("MODEL")
 
-        available = _user_info.get("available_models", [])
         tier_name = _user_info.get("tier", "free")
+        available = [
+            {"id": m, "vision": v}
+            for m, v in TIER_MODELS_CLIENT.get(tier_name, TIER_MODELS_CLIENT["free"])
+        ]
 
         if len(available) <= 1:
-            # Free / basic — fixed model, just show it
+            # Single model — just show it
             fixed_id   = available[0]["id"] if available else "gpt-4o-mini"
             fixed_name = MODEL_DISPLAY.get(fixed_id, fixed_id)
             tk.Label(body, text=fixed_name,
@@ -1717,7 +2330,8 @@ class ChatWindow(tk.Tk):
             n = delete_all_screenshots()
             self._ss_status.configure(
                 text=f"deleted {n} screenshot{'s' if n != 1 else ''}.", fg=RED)
-            self.after(3000, lambda: self._ss_status.configure(text=""))
+            self.after(3000, lambda: self._ss_status.configure(text="")
+                       if self._ss_status.winfo_exists() else None)
 
         del_btn.bind("<Button-1>", do_delete_screenshots)
         del_btn.bind("<Enter>",
@@ -1726,6 +2340,144 @@ class ChatWindow(tk.Tk):
         del_btn.bind("<Leave>",
             lambda e: (del_btn.configure(bg=BG_BASE, fg=RED),
                        del_outer.configure(bg=RED)))
+
+        # POPUP section
+        tk.Frame(body, bg=BORDER, height=1).pack(fill=tk.X, pady=(12, 0))
+        section_label("POPUP")
+
+        tk.Label(body, text="answer popup duration",
+                 font=(FONT_MONO, 8), fg=TEXT_SECONDARY, bg=BG_BASE).pack(anchor=tk.W)
+
+        dur_row = tk.Frame(body, bg=BG_BASE)
+        dur_row.pack(fill=tk.X, pady=(6, 0))
+
+        dur_secs = _overlay_duration_ms // 1000
+        dur_var  = tk.IntVar(value=dur_secs)
+
+        dur_val_lbl = tk.Label(dur_row, text=f"{dur_secs}s",
+                                font=(FONT_MONO, 9), fg=CYAN, bg=BG_BASE)
+
+        def on_dur_change(val):
+            global _overlay_duration_ms
+            secs = int(float(val))
+            _overlay_duration_ms = secs * 1000
+            dur_val_lbl.configure(text=f"{secs}s")
+            save_settings()
+
+        dur_slider = tk.Scale(
+            dur_row, from_=1, to=30, orient=tk.HORIZONTAL,
+            variable=dur_var, command=on_dur_change,
+            bg=BG_BASE, fg=TEXT_SECONDARY, troughcolor=BG_SURFACE2,
+            activebackground=CYAN, highlightthickness=0,
+            sliderrelief=tk.FLAT, bd=0, font=(FONT_MONO, 7),
+            showvalue=False, length=200,
+        )
+        dur_slider.pack(side=tk.LEFT)
+        dur_val_lbl.pack(side=tk.LEFT, padx=(6, 0))
+
+        tk.Label(body, text="click overlay to pin it and pause the timer",
+                 font=(FONT_MONO, 7), fg=TEXT_MUTED, bg=BG_BASE).pack(anchor=tk.W, pady=(4, 0))
+
+        tk.Frame(body, bg=BORDER, height=1).pack(fill=tk.X, pady=(12, 0))
+        section_label("SYSTEM PROMPT")
+
+        tk.Label(body,
+                 text="custom instructions sent with every message\n(leave blank to use default)",
+                 font=(FONT_MONO, 7), fg=TEXT_MUTED, bg=BG_BASE,
+                 justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 6))
+
+        sp_frame = tk.Frame(body, bg=BG_SURFACE2,
+                            highlightthickness=1, highlightbackground=BORDER)
+        sp_frame.pack(fill=tk.X, pady=(0, 6))
+
+        sp_box = tk.Text(sp_frame, height=4, wrap=tk.WORD,
+                         bg=BG_SURFACE2, fg=TEXT_PRIMARY,
+                         font=(FONT_MONO, 9), relief=tk.FLAT,
+                         insertbackground=CYAN, padx=8, pady=6)
+        sp_box.pack(fill=tk.X)
+        if _custom_system_prompt:
+            sp_box.insert("1.0", _custom_system_prompt)
+
+        sp_status = tk.Label(body, text="", font=(FONT_MONO, 7), fg=CYAN, bg=BG_BASE)
+        sp_status.pack(anchor=tk.W)
+
+        def save_sp(_=None):
+            global _custom_system_prompt
+            _custom_system_prompt = sp_box.get("1.0", tk.END).strip()
+            save_settings()
+            sp_status.configure(text="saved")
+            body.after(1500, lambda: sp_status.configure(text=""))
+
+        sp_save = tk.Label(body, text="  save prompt  ",
+                           font=(FONT_MONO, 8), fg=BG_BASE, bg=CYAN,
+                           cursor="hand2", padx=8, pady=4)
+        sp_save.pack(anchor=tk.W, pady=(4, 0))
+        sp_save.bind("<Button-1>", save_sp)
+
+        tk.Frame(body, bg=BORDER, height=1).pack(fill=tk.X, pady=(12, 0))
+        section_label("HOTKEYS")
+        tk.Label(body, text="all hotkeys use Ctrl+Shift+<key>",
+                 font=(FONT_MONO, 7), fg=TEXT_MUTED, bg=BG_BASE).pack(anchor=tk.W, pady=(0, 8))
+
+        hk_entries = {}
+        hk_status  = tk.Label(body, text="", font=(FONT_MONO, 7), fg=CYAN, bg=BG_BASE)
+
+        for action, label_text in [
+            ("screenshot", "Screenshot"),
+            ("highlight",  "Highlight"),
+            ("chat",       "Quick Ask"),
+            ("quit",       "Quit"),
+            ("voice",      "Voice Input"),
+        ]:
+            row = tk.Frame(body, bg=BG_BASE)
+            row.pack(fill=tk.X, pady=2)
+            tk.Label(row, text=f"Ctrl+Shift+", font=(FONT_MONO, 8),
+                     fg=TEXT_MUTED, bg=BG_BASE, width=14, anchor=tk.W).pack(side=tk.LEFT)
+            entry_frame = tk.Frame(row, bg=BG_SURFACE2, highlightthickness=1,
+                                   highlightbackground=BORDER)
+            entry_frame.pack(side=tk.LEFT)
+            ent = tk.Entry(entry_frame, width=3, bg=BG_SURFACE2, fg=CYAN,
+                           font=(FONT_MONO, 10), relief=tk.FLAT,
+                           insertbackground=CYAN, justify=tk.CENTER)
+            ent.insert(0, _hotkeys.get(action, ""))
+            ent.pack(padx=6, pady=3)
+            hk_entries[action] = ent
+            tk.Label(row, text=label_text, font=(FONT_MONO, 8),
+                     fg=TEXT_SECONDARY, bg=BG_BASE, padx=8).pack(side=tk.LEFT)
+
+        hk_status.pack(anchor=tk.W, pady=(4, 0))
+
+        def save_hotkeys(_=None):
+            global _hotkeys
+            used = set()
+            skipped = []
+            new_hk = dict(_hotkeys)
+            for action, ent in hk_entries.items():
+                val = ent.get().strip()[:1].lower()
+                if not val:
+                    # blank — keep existing key, restore it in the entry to match reality
+                    existing = _hotkeys.get(action, "")
+                    ent.delete(0, tk.END)
+                    ent.insert(0, existing)
+                    used.add(existing)
+                elif val not in used:
+                    new_hk[action] = val
+                    used.add(val)
+                else:
+                    skipped.append(action)
+            _hotkeys = new_hk  # single atomic swap — GIL-safe for listener thread
+            save_settings()
+            if skipped:
+                hk_status.configure(text=f"saved — duplicate key ignored: {', '.join(skipped)}")
+            else:
+                hk_status.configure(text="saved")
+            body.after(2500, lambda: hk_status.configure(text=""))
+
+        hk_save = tk.Label(body, text="  save hotkeys  ",
+                           font=(FONT_MONO, 8), fg=BG_BASE, bg=CYAN,
+                           cursor="hand2", padx=8, pady=4)
+        hk_save.pack(anchor=tk.W, pady=(4, 0))
+        hk_save.bind("<Button-1>", save_hotkeys)
 
     def _update_ss_hotkey_color(self):
         """Dim the screenshot shortcut label if current model has no vision."""
@@ -1768,6 +2520,7 @@ class ChatWindow(tk.Tk):
             ("Ctrl+Shift+S", "capture screenshot and ask"),
             ("Ctrl+Shift+H", "send highlighted text"),
             ("Ctrl+Shift+A", "open quick ask"),
+            ("Ctrl+Shift+V", "voice input"),
             ("Ctrl+Shift+Q", "quit"),
         ]:
             is_ss = keys == "Ctrl+Shift+S"
@@ -1813,6 +2566,7 @@ class ChatWindow(tk.Tk):
 
     def _scroll_bottom(self):
         self._canvas.update_idletasks()
+        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
         self._canvas.yview_moveto(1.0)
 
     # ── Message helpers ───────────────────────────────────────────────────────
@@ -1861,6 +2615,41 @@ class ChatWindow(tk.Tk):
         self._switch_page("chat")
         self.input_box.focus_set()
 
+    def _set_generating(self, generating: bool):
+        self._is_generating = generating
+        if generating:
+            self.input_box.configure(state=tk.DISABLED)
+            self._send_btn.configure(text="◼", fg=RED)
+            self._send_btn.unbind("<Button-1>")
+            self._send_btn.unbind("<Enter>")
+            self._send_btn.unbind("<Leave>")
+            self._send_btn.bind("<Button-1>", lambda e: self._cancel_generation())
+            self._send_btn.bind("<Enter>",    lambda e: self._send_btn.configure(fg="#ff7777"))
+            self._send_btn.bind("<Leave>",    lambda e: self._send_btn.configure(fg=RED))
+        else:
+            self._cancel_event.clear()
+            self.input_box.configure(state=tk.NORMAL)
+            self._send_btn.configure(text="↑", fg=CYAN)
+            self._send_btn.unbind("<Button-1>")
+            self._send_btn.unbind("<Enter>")
+            self._send_btn.unbind("<Leave>")
+            self._send_btn.bind("<Button-1>", lambda e: self._send_text())
+            self._send_btn.bind("<Enter>",    lambda e: self._send_btn.configure(fg=CYAN_HOVER))
+            self._send_btn.bind("<Leave>",    lambda e: self._send_btn.configure(fg=CYAN))
+
+    def _cancel_generation(self):
+        self._cancel_event.set()
+        self.status_var.set("cancelled")
+        self.after(1500, lambda: self.status_var.set("")
+                   if self.status_var.get() == "cancelled" else None)
+        if self._current_bubble:
+            self._current_bubble.append("\n[cancelled]")
+            self._current_bubble = None
+        # Do NOT call _set_generating(False) here — the worker thread's
+        # _Cancelled handler puts ("done", None) on msg_queue which resets
+        # state via _process_queue. Calling it here causes a race where the
+        # input re-enables before the thread has actually stopped.
+
     def _clear_chat(self):
         if self.conversation:
             self._save_current_chat()
@@ -1882,9 +2671,16 @@ class ChatWindow(tk.Tk):
         if self._overlay and not self._overlay._dismissed:
             try: self._overlay._dismiss()
             except: pass
-        ov = FloatingOverlay(self)
+        ov = FloatingOverlay(self, on_followup=self._handle_overlay_followup)
         self._overlay = ov
         return ov
+
+    def _handle_overlay_followup(self, text: str):
+        b = self._add_user_bubble("You")
+        b.append(text)
+        self._scroll_bottom()
+        self.conversation.append({"role": "user", "content": text})
+        self._run_claude_overlay_only(self.conversation[:])
 
     def _on_enter(self, event):
         if not event.state & 0x1:
@@ -1892,6 +2688,7 @@ class ChatWindow(tk.Tk):
             return "break"
 
     def _send_text(self):
+        if self._is_generating: return
         text = self.input_box.get("1.0", tk.END).strip()
         if not text: return
         self.input_box.delete("1.0", tk.END)
@@ -1899,20 +2696,32 @@ class ChatWindow(tk.Tk):
         b.append(text)
         self._scroll_bottom()
         self.conversation.append({"role": "user", "content": text})
+        # Auto-name tab from first user message
+        if len(self.conversation) == 1:
+            short = text[:20].strip()
+            self._sessions[self._active_session].name = short
+            self._refresh_tab_bar()
         self._run_claude()
 
     def send_screenshot(self, img: Image.Image, prompt: str):
         # 1. Save to disk
         save_screenshot_to_disk(img, prompt)
 
-        # 2. Add thumbnail card to screenshots page (background, no console open)
+        # 2. Add thumbnail card to screenshots page
         ts = datetime.now().strftime("%H:%M")
         ss_thumb = img.copy(); ss_thumb.thumbnail((100, 70))
         card_photo = ImageTk.PhotoImage(ss_thumb)
         self._images.append(card_photo)
+        if len(self._images) > 50:       # cap to avoid unbounded memory growth
+            self._images = self._images[-50:]
         self._add_screenshot_card(card_photo, prompt, ts)
 
-        # 3. Store in conversation silently (no bubble, no restore)
+        # 3. Add user bubble to chat showing the prompt
+        b = self._add_user_bubble("Screenshot")
+        b.append(f"[screenshot] {prompt}")
+        self._scroll_bottom()
+
+        # 4. Store in conversation
         b64 = pil_to_b64(img)
         self.conversation.append({
             "role": "user",
@@ -1925,13 +2734,19 @@ class ChatWindow(tk.Tk):
             ]
         })
 
-        # 4. Stream response to overlay only — console stays minimised
+        # 5. Stream to overlay + chat console (window stays minimised)
         self._run_claude_overlay_only(self.conversation[:])
 
     def _run_claude_overlay_only(self, messages: list):
-        """Run Claude and stream result to overlay only — console stays hidden."""
+        """Stream Claude to both the overlay popup AND the chat console."""
+        if self._is_generating:
+            return
+        self._set_generating(True)
         overlay = self._new_overlay()
         overlay.append("thinking...")
+        ab = self._add_assistant_bubble()
+        self._current_bubble = ab
+        cancel = self._cancel_event
 
         def worker():
             try:
@@ -1942,15 +2757,16 @@ class ChatWindow(tk.Tk):
                         msg_queue.put(("overlay_clear", None))
                         first[0] = False
                     full_reply.append(chunk)
-                    msg_queue.put(("overlay_chunk", chunk))
-                ask_claude(messages, on_chunk=on_chunk)
-                # Append assistant reply to real conversation for context continuity
+                    msg_queue.put(("chunk", chunk))
+                ask_claude(messages, on_chunk=on_chunk, cancel_event=cancel)
                 reply_text = "".join(full_reply)
                 if reply_text:
                     self.conversation.append({"role": "assistant", "content": reply_text})
-                msg_queue.put(("overlay_done", None))
+                msg_queue.put(("done", None))
+            except _Cancelled:
+                msg_queue.put(("done", None))
             except Exception as e:
-                msg_queue.put(("overlay_error", str(e)))
+                msg_queue.put(("error", str(e)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1958,7 +2774,13 @@ class ChatWindow(tk.Tk):
         MAX_CHARS = 8000
         if len(text) > MAX_CHARS:
             text = text[:MAX_CHARS] + f"\n\n[truncated — {len(text) - MAX_CHARS} chars omitted]"
-        # Store in conversation silently — no bubble, no restore
+
+        # Add user bubble showing a preview of the highlighted text
+        preview = text[:120] + ("..." if len(text) > 120 else "")
+        b = self._add_user_bubble("Highlight")
+        b.append(f"[highlight] {preview}")
+        self._scroll_bottom()
+
         self.conversation.append({
             "role": "user",
             "content": (
@@ -1966,15 +2788,17 @@ class ChatWindow(tk.Tk):
                 "Please explain, summarise, answer, or help with it."
             )
         })
-        # Stream response to overlay only — console stays minimised
+        # Stream to overlay + chat console
         self._run_claude_overlay_only(self.conversation[:])
 
     def _run_claude(self):
+        self._set_generating(True)
         self.status_var.set("thinking...")
         ab = self._add_assistant_bubble()
         self._current_bubble = ab
         overlay = self._new_overlay()
         overlay.append("thinking...")
+        cancel = self._cancel_event
 
         def worker():
             try:
@@ -1984,8 +2808,11 @@ class ChatWindow(tk.Tk):
                         msg_queue.put(("overlay_clear", None))
                         first[0] = False
                     msg_queue.put(("chunk", chunk))
-                full = ask_claude(self.conversation, on_chunk=on_chunk)
+                full = ask_claude(self.conversation[:], on_chunk=on_chunk,
+                                  cancel_event=cancel)
                 self.conversation.append({"role": "assistant", "content": full})
+                msg_queue.put(("done", None))
+            except _Cancelled:
                 msg_queue.put(("done", None))
             except Exception as e:
                 msg_queue.put(("error", str(e)))
@@ -2007,12 +2834,19 @@ class ChatWindow(tk.Tk):
                         self._overlay.clear_text()
                 elif kind == "done":
                     self.status_var.set("")
+                    if self._current_bubble:
+                        self._current_bubble.render_math()
+                        self._scroll_bottom()
                     self._current_bubble = None
+                    self._set_generating(False)
+                    if self._overlay and not self._overlay._dismissed:
+                        self._overlay.render_math()
                 elif kind == "overlay_chunk":
                     if self._overlay and not self._overlay._dismissed:
                         self._overlay.append(data)
                 elif kind == "overlay_done":
-                    pass  # overlay auto-dismisses via timer
+                    if self._overlay and not self._overlay._dismissed:
+                        self._overlay.render_math()
                 elif kind == "overlay_error":
                     if self._overlay and not self._overlay._dismissed:
                         self._overlay.clear_text()
@@ -2027,11 +2861,13 @@ class ChatWindow(tk.Tk):
                 elif kind == "error":
                     msg = str(data)
                     self.status_var.set("")
+                    self._set_generating(False)
                     if "Session expired" in msg:
                         clear_auth()
-                        self.destroy()
-                        login = LoginScreen(on_complete=lambda: ChatWindow().mainloop())
-                        login.mainloop()
+                        def _restart():
+                            self.destroy()
+                            LoginScreen(on_complete=lambda: ChatWindow().mainloop()).mainloop()
+                        self.after(0, _restart)
                         return
                     self._add_system_note(f"error: {msg}")
                     if self._overlay and not self._overlay._dismissed:
@@ -2043,17 +2879,15 @@ class ChatWindow(tk.Tk):
 
     def _open_mini_chat(self, note=None):
         def on_send(text):
-            # Store in conversation — no bubble, no restore
+            b = self._add_user_bubble("You")
+            b.append(text)
+            self._scroll_bottom()
             self.conversation.append({"role": "user", "content": text})
             self._run_claude_overlay_only(self.conversation[:])
         MiniChat(self, on_send, note=note)
 
     def _start_hotkeys(self):
         current_keys = set()
-        SCREENSHOT_CHARS = {'\x13', 's', 'S'}
-        HIGHLIGHT_CHARS  = {'\x08', 'h', 'H'}
-        CHAT_CHARS       = {'\x01', 'a', 'A'}
-        QUIT_CHARS       = {'\x11', 'q', 'Q'}
 
         def normalize(k):
             if k == keyboard.Key.ctrl_r:  return keyboard.Key.ctrl_l
@@ -2068,21 +2902,31 @@ class ChatWindow(tk.Tk):
         def is_ctrl_shift(keys):
             return keyboard.Key.ctrl_l in keys and keyboard.Key.shift in keys
 
+        def matches(char, action):
+            k = _hotkeys.get(action, "")
+            if not char or not k: return False
+            return char.lower() == k.lower() or (
+                ord(char) < 32 and chr(ord(char) + 64).lower() == k.lower()
+            )
+
         def on_press(key):
             current_keys.add(normalize(key))
             char = get_char(key)
             if is_ctrl_shift(current_keys):
-                if char in SCREENSHOT_CHARS:
+                if matches(char, "screenshot"):
                     current_keys.clear()
                     self.after(0, self._trigger_screenshot)
-                elif char in HIGHLIGHT_CHARS:
+                elif matches(char, "highlight"):
                     current_keys.clear()
                     self.after(0, self._trigger_highlight)
-                elif char in CHAT_CHARS:
+                elif matches(char, "chat"):
                     current_keys.clear()
                     self.after(0, self._open_mini_chat)
-                elif char in QUIT_CHARS:
+                elif matches(char, "quit"):
                     self.after(0, self.destroy)
+                elif matches(char, "voice"):
+                    current_keys.clear()
+                    self.after(0, self._trigger_voice)
 
         def on_release(key):
             current_keys.discard(normalize(key))
@@ -2091,51 +2935,97 @@ class ChatWindow(tk.Tk):
         listener.daemon = True
         listener.start()
 
+    def _trigger_voice(self):
+        if self._mic_btn is None:
+            return
+        try:
+            import sounddevice  # noqa — check available
+        except ImportError:
+            self._add_system_note("voice input requires: pip install sounddevice numpy")
+            return
+        if self._is_generating:
+            return
+        if getattr(self, "_recording", False):
+            return
+
+        self._recording = True
+        self._mic_btn.configure(fg="#ff4d4d")
+        self.status_var.set("recording 5s...")
+
+        def worker():
+            try:
+                wav = _record_wav(seconds=5)
+                self.after(0, lambda: self.status_var.set("transcribing..."))
+                text = _transcribe_wav(wav)
+
+                def fill_input():
+                    self.status_var.set("")
+                    self._recording = False
+                    self._mic_btn.configure(fg=TEXT_MUTED)
+                    if text:
+                        self.input_box.delete("1.0", tk.END)
+                        self.input_box.insert("1.0", text)
+                        self.input_box.focus_set()
+
+                self.after(0, fill_input)
+            except Exception as ex:
+                def show_err():
+                    self.status_var.set("")
+                    self._recording = False
+                    self._mic_btn.configure(fg=TEXT_MUTED)
+                    self._add_system_note(f"voice error: {ex}")
+                self.after(0, show_err)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _trigger_screenshot(self):
         if self._overlay and not self._overlay._dismissed:
             try: self._overlay._dismiss()
             except: pass
         self.iconify(); self.update()
-        time.sleep(0.2)
 
-        def got_image(img):
-            def on_submit(i, p):
-                msg_queue.put(("screenshot", (i, p)))
-                # do NOT restore the main console — answer goes to overlay only
-            dlg = PromptDialog(self, img, on_submit)
-            dlg.protocol = lambda *a: None
-            dlg.after(80, lambda: (
-                dlg.lift(),
-                dlg.attributes("-topmost", True),
-                dlg.entry.focus_force()
-            ))
-        ScreenshotSelector(self, got_image)
+        def _open_selector():
+            def got_image(img):
+                def on_submit(i, p):
+                    msg_queue.put(("screenshot", (i, p)))
+                dlg = PromptDialog(self, img, on_submit)
+                dlg.protocol = lambda *a: None
+                dlg.after(80, lambda: (
+                    dlg.lift(),
+                    dlg.attributes("-topmost", True),
+                    dlg.entry.focus_force()
+                ))
+            ScreenshotSelector(self, got_image)
+
+        self.after(200, _open_selector)
 
     def _trigger_highlight(self):
-        from pynput.keyboard import Controller, Key
-        import platform
-        kb = Controller()
-        old_clip = ""
-        try:    old_clip = pyperclip.paste()
-        except: pass
-        for k in (Key.ctrl_l, Key.ctrl_r, Key.shift, Key.shift_r):
-            try: kb.release(k)
+        def _work():
+            from pynput.keyboard import Controller, Key
+            import platform
+            kb = Controller()
+            old_clip = ""
+            try:    old_clip = pyperclip.paste()
             except: pass
-        time.sleep(0.15)
-        if platform.system() == "Darwin":
-            with kb.pressed(Key.cmd):
-                kb.press('c'); kb.release('c')
-        else:
-            with kb.pressed(Key.ctrl_l):
-                kb.press('c'); kb.release('c')
-        time.sleep(0.4)
-        try:    new_clip = pyperclip.paste()
-        except: new_clip = ""
-        if new_clip and new_clip.strip() and new_clip != old_clip:
-            msg_queue.put(("highlight", new_clip))
-        else:
-            self.after(100, lambda: self._open_mini_chat(
-                note="no text detected — highlight first, then Ctrl+Shift+H"))
+            for k in (Key.ctrl_l, Key.ctrl_r, Key.shift, Key.shift_r):
+                try: kb.release(k)
+                except: pass
+            time.sleep(0.15)
+            if platform.system() == "Darwin":
+                with kb.pressed(Key.cmd):
+                    kb.press('c'); kb.release('c')
+            else:
+                with kb.pressed(Key.ctrl_l):
+                    kb.press('c'); kb.release('c')
+            time.sleep(0.4)
+            try:    new_clip = pyperclip.paste()
+            except: new_clip = ""
+            if new_clip and new_clip.strip() and new_clip != old_clip:
+                msg_queue.put(("highlight", new_clip))
+            else:
+                self.after(0, lambda: self._open_mini_chat(
+                    note="no text detected — highlight first, then Ctrl+Shift+H"))
+        threading.Thread(target=_work, daemon=True).start()
 
 
 
@@ -2212,6 +3102,9 @@ class LoginScreen(tk.Tk):
         self._email.pack(fill=tk.X, padx=10, pady=7)
         self._email.bind("<FocusIn>",  lambda e: email_frame.configure(highlightbackground=CYAN))
         self._email.bind("<FocusOut>", lambda e: email_frame.configure(highlightbackground=BORDER))
+        saved_email = _user_info.get("email", "")
+        if saved_email:
+            self._email.insert(0, saved_email)
 
         # Password
         tk.Label(body, text="PASSWORD", font=(FONT_MONO, 7, "bold"),
@@ -2226,6 +3119,8 @@ class LoginScreen(tk.Tk):
         self._password.bind("<FocusIn>",  lambda e: pw_frame.configure(highlightbackground=CYAN))
         self._password.bind("<FocusOut>", lambda e: pw_frame.configure(highlightbackground=BORDER))
         self._password.bind("<Return>",   lambda e: self._do_login())
+        if saved_email:
+            self.after(50, self._password.focus_set)
 
         # Buttons row
         btn_row = tk.Frame(body, bg=BG_BASE)
@@ -2411,23 +3306,29 @@ class LoginScreen(tk.Tk):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    load_settings()  # load user preferences before any UI
+
     # Check for updates in background — never blocks startup
-    update_thread = threading.Thread(target=check_for_updates, daemon=True)
-    update_thread.start()
+    threading.Thread(target=check_for_updates, daemon=True).start()
 
     def launch_app():
         app = ChatWindow()
+
+        # Validate tokens in background — don't block the window opening
+        def _bg_validate():
+            if not refresh_access_token():
+                clear_auth()
+                app.after(0, lambda: (
+                    app.destroy(),
+                    LoginScreen(on_complete=lambda: ChatWindow().mainloop()).mainloop()
+                ))
+        threading.Thread(target=_bg_validate, daemon=True).start()
+
         app.mainloop()
 
-    # Try loading saved tokens first
     if load_auth():
-        # Validate by refreshing — if it works, go straight to app
-        if refresh_access_token():
-            launch_app()
-        else:
-            clear_auth()
-            login = LoginScreen(on_complete=launch_app)
-            login.mainloop()
+        # Open app immediately — token refresh happens in background
+        launch_app()
     else:
         login = LoginScreen(on_complete=launch_app)
         login.mainloop()
