@@ -198,7 +198,7 @@ def _show_update_dialog_if_pending(window: tk.Tk):
 # ── Model metadata (mirrors backend config) ───────────────────────────────────
 # Fallback model lists per tier — used when available_models isn't populated yet
 TIER_MODELS_CLIENT = {
-    "free":  [("gpt-4o-mini", True)],
+    "free":  [("gpt-4o-mini", True), ("gpt-4o", True)],
     "basic": [("gpt-4o-mini", True), ("gpt-4o", True)],
     "pro":   [("gpt-4o-mini", True), ("gpt-4o", True), ("gpt-4-turbo", True),
               ("o1-mini", False), ("claude-haiku-4-5-20251001", True)],
@@ -2252,8 +2252,8 @@ class ChatWindow(tk.Tk):
             for m, v in TIER_MODELS_CLIENT.get(tier_name, TIER_MODELS_CLIENT["free"])
         ]
 
-        if tier_name not in ("pro", "power"):
-            # Free / basic — fixed model, just show it
+        if len(available) <= 1:
+            # Single model — just show it
             fixed_id   = available[0]["id"] if available else "gpt-4o-mini"
             fixed_name = MODEL_DISPLAY.get(fixed_id, fixed_id)
             tk.Label(body, text=fixed_name,

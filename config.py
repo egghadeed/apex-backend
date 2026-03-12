@@ -59,7 +59,7 @@ TIER_DEFAULT_MODEL = {
 
 # Models each tier can choose from (cumulative — higher tiers include lower tiers)
 TIER_SELECTABLE_MODELS = {
-    "free":  ["gpt-4o-mini"],
+    "free":  ["gpt-4o-mini", "gpt-4o"],
     "basic": ["gpt-4o-mini", "gpt-4o"],
     "pro":   ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "o1-mini",
               "claude-haiku-4-5-20251001"],
